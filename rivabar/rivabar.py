@@ -19,7 +19,6 @@ import rasterio
 from rasterio.plot import adjust_band
 from rasterio import features
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from descartes import PolygonPatch
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon, MultiLineString, GeometryCollection, MultiPoint
 from shapely.ops import polygonize, polygonize_full, split, linemerge, nearest_points
 from libpysal import weights
