@@ -18,6 +18,7 @@ import glob
 import rasterio
 from rasterio.plot import adjust_band
 from rasterio import features
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 from descartes import PolygonPatch
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon, MultiLineString, GeometryCollection, MultiPoint
 from shapely.ops import polygonize, polygonize_full, split, linemerge, nearest_points
@@ -1106,6 +1107,48 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
                                      savgol_poly_order = 3)
         plt.plot(x, y, 'k')
     return fig
+
+def read_and_plot_im(dirname, fname):
+    with rasterio.open(dirname+fname) as dataset:
+        im = dataset.read(1)
+        left_utm_x = dataset.transform[2]
+        upper_utm_y = dataset.transform[5]
+        delta_x = dataset.transform[0]
+        delta_y = dataset.transform[4]
+        nxpix = im.shape[1]
+        nypix = im.shape[0]
+        right_utm_x = left_utm_x + delta_x*nxpix
+        lower_utm_y = upper_utm_y + delta_y*nypix  
+    plt.figure()
+    plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y])
+    return im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
+
+def convert_geographic_proj_to_utm(dirname, fname, dstCrs):
+    #open source raster
+    srcRst = rasterio.open(dirname+fname)
+    #calculate transform array and shape of reprojected raster
+    transform, width, height = calculate_default_transform(
+            srcRst.crs, dstCrs, srcRst.width, srcRst.height, *srcRst.bounds)
+    #working of the meta for the destination raster
+    kwargs = srcRst.meta.copy()
+    kwargs.update({
+            'crs': dstCrs,
+            'transform': transform,
+            'width': width,
+            'height': height
+        })
+    #open destination raster
+    dstRst = rasterio.open(dirname+fname[:-4]+'_UTM.tif', 'w', **kwargs)
+    #reproject and save raster band data
+    for i in range(1, srcRst.count + 1):
+        reproject(
+            source=rasterio.band(srcRst, i),
+            destination=rasterio.band(dstRst, i),
+            src_crs=srcRst.crs,
+            dst_crs=dstCrs,
+            resampling=Resampling.nearest)
+    #close destination raster
+    dstRst.close()
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
