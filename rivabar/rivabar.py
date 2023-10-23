@@ -132,7 +132,31 @@ def convert_to_uint8(channel):
     channel8 = channel8.astype('uint8')
     return channel8
 
-def read_landsat_data_multiple_tifs(dirname, fname, mndwi_threshold=0.01):
+def process_band(dirname, fname, band_numbers):
+    """
+    Helper function to open and read a specific band.
+
+    Args:
+        dirname: Path to folder that conatins the Landsat TIF files.
+        fname: Name of Landsat tile or individual TIF file.
+        band_numbers: Band numbers.
+
+    Returns:
+        bands: The band data.
+        dataset: The rasterio dataset.
+    """
+    bands = {}
+    if fname[-4:] == '.TIF' or fname[-4:] == '.tif': # single tif file
+        with rasterio.open(os.path.join(dirname, fname), 'r') as dataset:
+            for band_number in tqdm(band_numbers):
+                bands[band_number] = dataset.read(band_number)
+    else: # multiple TIF files
+        for band_number in tqdm(band_numbers):
+            with rasterio.open(os.path.join(dirname, fname, f'{fname}_B{band_number}.TIF')) as dataset:
+                bands[band_number] = dataset.read(1)
+    return bands, dataset
+
+def read_landsat_data(dirname, fname, mndwi_threshold=0.01):
     """
     Read Landsat data from multiple TIF files and perform various operations.
 
@@ -144,31 +168,15 @@ def read_landsat_data_multiple_tifs(dirname, fname, mndwi_threshold=0.01):
     Returns:
         tuple: A tuple containing the processed image, MNDWI mask, and transformation parameters.
     """
-    def process_band(dirname, fname, band_num):
-        """
-        Helper function to open and read a specific band.
-
-        Args:
-            dirname: Path to folder that conatins the Landsat TIF files
-            fname: Name of Landsat tile (not the name of an individual TIF file!)
-            band_num (int): Band number.
-
-        Returns:
-            numpy.ndarray: The band data.
-            dataset: The rasterio dataset.
-        """
-        dataset = rasterio.open(os.path.join(dirname, fname, f'{fname}_B{band_num}.TIF'))
-        band = dataset.read(1)
-        return band, dataset
-
-    bands = {} # dictionary to store bands
+    # bands = {} # dictionary to store bands
+    # this probably should be modified as not all recent landsat file names start with LC08
     if fname[:4] == 'LC08': # landsat 8
         band_numbers = [3, 6, 2, 4]
     else: # landsat 4 and 5
         band_numbers = [3, 5, 2, 1]
-    for band_number in band_numbers:
-        band, dataset = process_band(dirname, fname, band_number)
-        bands[band_number] = band
+    # for band_number in tqdm(band_numbers):
+    bands, dataset = process_band(dirname, fname, band_numbers)
+        # bands[band_number] = band
 
     if fname[:4] == 'LC08': # landsat 8
         rgb = np.stack([bands[4], bands[3], bands[2]], axis=-1)
@@ -203,94 +211,29 @@ def read_landsat_data_multiple_tifs(dirname, fname, mndwi_threshold=0.01):
     mndwi[mndwi != 1] = 0
 
     return equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y
-
-def read_landsat_data_single_tif(dirname, fname, mndwi_threshold=0.01):
-    if fname[:4] == 'LC08':
-        dataset = rasterio.open(dirname+fname)
-        band2 = dataset.read(2)
-        band3 = dataset.read(3)
-        band4 = dataset.read(4)
-        rgb = np.stack([band4, band3, band2], axis=-1)
-        rgb_norm = adjust_band(rgb)
-        left_utm_x = dataset.transform[2]
-        upper_utm_y = dataset.transform[5]
-        delta_x = dataset.transform[0]
-        delta_y = dataset.transform[4]
-        nxpix = rgb.shape[1]
-        nypix = rgb.shape[0]
-        right_utm_x = left_utm_x + delta_x*nxpix
-        lower_utm_y = upper_utm_y + delta_y*nypix
-        R, G, B = cv2.split(rgb_norm)
-        R8 = R*255
-        R8 = R8.astype('uint8')
-        G8 = G*255
-        G8 = G8.astype('uint8')
-        B8 = B*255
-        B8 = B8.astype('uint8')
-        clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
-        output1_R = clahe.apply(R8)
-        output1_G = clahe.apply(G8)
-        output1_B = clahe.apply(B8)
-        equ = cv2.merge((output1_R, output1_G, output1_B))
-        B3 = dataset.read(3)
-        B6 = dataset.read(6)
-        mndwi = normalized_difference(B3, B6)
-        mndwi[mndwi > mndwi_threshold] = 1
-        mndwi[mndwi != 1] = 0
-    else:
-        dataset = rasterio.open(dirname+fname)
-        band1 = dataset.read(1)
-        band2 = dataset.read(2)
-        band3 = dataset.read(3)
-        rgb = np.stack([band3, band2, band1], axis=-1)
-        rgb_norm = adjust_band(rgb)
-        left_utm_x = dataset.transform[2]
-        upper_utm_y = dataset.transform[5]
-        delta_x = dataset.transform[0]
-        delta_y = dataset.transform[4]
-        nxpix = rgb.shape[1]
-        nypix = rgb.shape[0]
-        right_utm_x = left_utm_x + delta_x*nxpix
-        lower_utm_y = upper_utm_y + delta_y*nypix
-        R, G, B = cv2.split(rgb_norm)
-        R8 = R*255
-        R8 = R8.astype('uint8')
-        G8 = G*255
-        G8 = G8.astype('uint8')
-        B8 = B*255
-        B8 = B8.astype('uint8')
-        clahe = cv2.createCLAHE(clipLimit=1.0, tileGridSize=(8,8))
-        output1_R = clahe.apply(R8)
-        output1_G = clahe.apply(G8)
-        output1_B = clahe.apply(B8)
-        equ = cv2.merge((output1_R, output1_G, output1_B))
-        band5 = dataset.read(5)
-        mndwi = normalized_difference(band2, band5)
-        mndwi[mndwi > mndwi_threshold] = 1
-        mndwi[mndwi != 1] = 0
-
-    return equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y
     
 def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type, ratio = 10, 
     ch_belt_smooth_factor = 1e9, remove_smaller_components = False, delete_pixels_polys = False, 
     n_pixels_per_channel = 10, mndwi_threshold = 0.01, small_hole_threshold = 64):
-    if file_type == 'multiple_tifs':
-        equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data_multiple_tifs(dirname, fname, mndwi_threshold = mndwi_threshold)
-    if file_type == 'single_tif':
-        equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data_single_tif(dirname, fname, mndwi_threshold = mndwi_threshold)
-    if file_type == 'water_index':
-        dataset = rasterio.open(dirname + fname)
-        mndwi = dataset.read(1)
-        mndwi[mndwi > float(mndwi_threshold)] = 1
-        mndwi[mndwi != 1] = 0
-        left_utm_x = dataset.transform[2]
-        upper_utm_y = dataset.transform[5]
-        delta_x = dataset.transform[0]
-        delta_y = dataset.transform[4]
+    """
+    Extract channel centrelines and banks from a georeferenced image.
+    """
+    if file_type == 'water_index': # single water index raster
+        with rasterio.open(dirname + fname) as dataset:
+            mndwi = dataset.read(1)
+            mndwi[mndwi > float(mndwi_threshold)] = 1
+            mndwi[mndwi != 1] = 0
+            left_utm_x = dataset.transform[2]
+            upper_utm_y = dataset.transform[5]
+            delta_x = dataset.transform[0]
+            delta_y = dataset.transform[4]
         nxpix = mndwi.shape[1]
         nypix = mndwi.shape[0]
         right_utm_x = left_utm_x + delta_x*nxpix
         lower_utm_y = upper_utm_y + delta_y*nypix
+    else: # single Landsat TIF file or multiple Landsat TIF files
+        print('reading Landsat data')
+        equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data(dirname, fname, mndwi_threshold = mndwi_threshold)
 
     if delete_pixels_polys:
         rst_arr = mndwi.astype('uint32').copy()
