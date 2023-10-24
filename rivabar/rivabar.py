@@ -168,15 +168,12 @@ def read_landsat_data(dirname, fname, mndwi_threshold=0.01):
     Returns:
         tuple: A tuple containing the processed image, MNDWI mask, and transformation parameters.
     """
-    # bands = {} # dictionary to store bands
     # this probably should be modified as not all recent landsat file names start with LC08
     if fname[:4] == 'LC08': # landsat 8
         band_numbers = [3, 6, 2, 4]
     else: # landsat 4 and 5
         band_numbers = [3, 5, 2, 1]
-    # for band_number in tqdm(band_numbers):
     bands, dataset = process_band(dirname, fname, band_numbers)
-        # bands[band_number] = band
 
     if fname[:4] == 'LC08': # landsat 8
         rgb = np.stack([bands[4], bands[3], bands[2]], axis=-1)
@@ -1070,7 +1067,26 @@ def read_and_plot_im(dirname, fname):
         lower_utm_y = upper_utm_y + delta_y*nypix  
     plt.figure()
     plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y])
-    return im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
+    return im, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
+
+def create_channel_nw_polygon(G_rook):
+    """
+    create a channel network polygon - a single polygon with holes where there are islands / bars
+    """
+    x1 = G_rook.nodes()[0]['bank_polygon'].xy[0]
+    y1 = G_rook.nodes()[0]['bank_polygon'].xy[1]
+    x2 = G_rook.nodes()[1]['bank_polygon'].xy[0]
+    y2 = G_rook.nodes()[1]['bank_polygon'].xy[1]
+    x = np.hstack((x1, x2, x1[0]))
+    y = np.hstack((y1, y2, y1[0]))
+    exterior = np.vstack((x,y)).T
+    interior = []
+    for i in range(2, len(G_rook)):
+        x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
+        y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+        interior.append(list(map(tuple, np.vstack((x,y)).T)))
+    ch_nw_poly = Polygon(exterior, holes=interior)
+    return ch_nw_poly
 
 def convert_geographic_proj_to_utm(dirname, fname, dstCrs):
     #open source raster

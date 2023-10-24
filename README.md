@@ -1,6 +1,6 @@
 # rivabar
 
-<img src="https://github.com/zsylvester/rivabar/blob/main/rivabar_logo.png" width="600">
+<img src="https://github.com/zsylvester/rivabar/blob/main/rivabar_logo.png" width="400">
 
 ## Description
 
