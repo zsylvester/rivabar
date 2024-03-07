@@ -1,0 +1,31 @@
+name: rivabar
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - numpy
+  - matplotlib=3.7.1
+  - pyqt=5.15.7
+  - pandas
+  - jupyterlab
+  - scipy
+  - scikit-image
+  - scikit-learn
+  - geopandas
+  - pyproj
+  - tqdm
+  - networkx
+  - shapely
+  - libpysal
+  - momepy
+  - geemap
+  - geedim
+  - osmnx
+  - pip
+  - pip:
+    - sknw
+    - rasterio
+    - opencv-python
