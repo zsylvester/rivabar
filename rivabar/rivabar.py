@@ -289,6 +289,10 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         shapes = ((geom, value) for geom, value in zip(delete_pixels_polys, np.ones((len(delete_pixels_polys),))))
         mndwi = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)
 
+    if max(np.shape(mndwi)) > 2**16//2:
+        print('maximum dimension of input image needs to be smaller than 32768!')
+        return [], [], [], [], [], [], [], [], [], [], []
+    
     print('removing small holes')
     mndwi = remove_small_holes(mndwi.astype('bool'), small_hole_threshold) # remove small holes
     if remove_smaller_components:
@@ -318,6 +322,14 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     print('building graph from skeleton')
     graph = sknw.build_sknw(skeleton, multi=True) # build multigraph from skeleton
     print('finding reasonable starting and ending points on graph edges')
+    if type(start_x) == str:
+        start_x = float(start_x)
+    if type(start_y) == str:
+        start_y = float(start_y)
+    if type(end_x) == str:
+        end_x = float(end_x)
+    if type(end_y) == str:
+        end_y = float(end_y)
     start_ind1, end_ind1, start_ind2, end_ind2 = \
         find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_x, end_y, \
                                     left_utm_x, upper_utm_y, delta_x, delta_y)
@@ -361,6 +373,10 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
             mndwi = img.astype('bool')
             skeleton = skeletonize(mndwi) # skeletonization
             graph = sknw.build_sknw(skeleton, multi=True) # build multigraph from skeleton
+            # for i in range(len(graph)): # this is needed because 'sknw' doesn't work with large images
+            #     if graph.nodes[i]['pts'][0] < 0 or graph.nodes[i]['pts'][1] < 0:
+            #         print('Image is too large! Try a smaller image.')
+            #         return [], [], [], [], [], [], [], [], [], [], []
             start_ind1, end_ind1, start_ind2, end_ind2 = \
                 find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_x, end_y, \
                                                 left_utm_x, upper_utm_y, delta_x, delta_y)
@@ -818,6 +834,15 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     utm_coords = []
     x1_poly, y1_poly, ch_map = get_bank_coords(poly1_utm, mndwi, dataset, timer=True)
     x2_poly, y2_poly, ch_map = get_bank_coords(poly2_utm, mndwi, dataset, timer=True)
+    # need to lengthen the banklines so that they intersect the main centerline polygons:
+    a1, b1 = getExtrapolatedLine((x1_poly[1], y1_poly[1]), (x1_poly[0], y1_poly[0]), float(ratio))
+    a2, b2 = getExtrapolatedLine((x1_poly[-2], y1_poly[-2]), (x1_poly[-1], y1_poly[-1]), float(ratio))
+    x1_poly = np.hstack((b1[0], x1_poly, b2[0]))
+    y1_poly = np.hstack((b1[1], y1_poly, b2[1]))
+    a1, b1 = getExtrapolatedLine((x2_poly[1], y2_poly[1]), (x2_poly[0], y2_poly[0]), float(ratio))
+    a2, b2 = getExtrapolatedLine((x2_poly[-2], y2_poly[-2]), (x2_poly[-1], y2_poly[-1]), float(ratio))
+    x2_poly = np.hstack((b1[0], x2_poly, b2[0]))
+    y2_poly = np.hstack((b1[1], y2_poly, b2[1]))
 
     # delete the unnecessary bits from the main bankline polygons (so that they are proper banklines):
     # row1 = int(ycoords1)
@@ -896,6 +921,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
 
     # create a directed multigraph based on G_primal:
     xs, ys = convert_to_utm(np.array(xs), np.array(ys), left_utm_x, upper_utm_y, delta_x, delta_y)
+    print('creating directed graph')
     D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys)
 
     return D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys
@@ -1097,7 +1123,6 @@ def get_bank_coords(poly, mndwi, dataset, timer=False):
                     ch_map[r1:r2, c1:c2] = np.maximum(tile[tr1:tr2, tc1:tc2], ch_map[r1:r2, c1:c2])
     ch_map[rasterized_poly == 0] = 1
     ch_map = ~(ch_map.astype('bool'))
-    # ch_map = ndimage.binary_dilation(ch_map) # needed to counteract 'w+0.5' above
     contours = find_contours(ch_map, 0.5)
     contour_lengths = []
     for i in range(len(contours)):
@@ -1284,15 +1309,20 @@ def create_channel_nw_polygon(G_rook):
     """
     create a channel network polygon - a single polygon with holes where there are islands / bars
 
-    this DOES NOT work with the main bank lines being polygons! (need to update the function)
     """
-    x1 = G_rook.nodes()[0]['bank_polygon'].exterior.xy[0]
-    y1 = G_rook.nodes()[0]['bank_polygon'].exterior.xy[1]
-    x2 = G_rook.nodes()[1]['bank_polygon'].exterior.xy[0]
-    y2 = G_rook.nodes()[1]['bank_polygon'].exterior.xy[1]
-    x = np.hstack((x1, x2[::-1], x1[0]))
-    y = np.hstack((y1, y2[::-1], y1[0]))
-    exterior = np.vstack((x,y)).T
+    two_main_banks = G_rook.nodes[0]['bank_polygon'].union(G_rook.nodes[1]['bank_polygon'])
+    difference = two_main_banks.convex_hull.difference(two_main_banks)
+    count = 0
+    count = 0
+    for geom in difference.geoms:
+        for i in range(2, len(G_rook)):
+            if geom.contains(G_rook.nodes[i]['bank_polygon']):
+                break
+        if geom.contains(G_rook.nodes[i]['bank_polygon']):
+            break
+        count += 1
+    ch_belt = difference.geoms[count]
+    exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
     interior = []
     for i in range(2, len(G_rook)):
         x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
@@ -1479,7 +1509,11 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=Fals
     # that surround the bar (or rook node). The order of iterating through the edges makes sure
     # that that bar/island already has some directed edges added for .
     processed_nodes = [0, 1]
+    nit = 0
     while len(processed_nodes) < len(G_rook):
+        if nit > 1e8:
+            print('something went wrong, breaking while loop!')
+            break
         neighbors = []
         for node in processed_nodes:
             for n in G_rook.neighbors(node):
@@ -1542,9 +1576,10 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=Fals
                                 D_primal[e][s][d][key] = G_primal[s][e][d][key]
                 if node not in processed_nodes:
                     processed_nodes.append(node)
+        nit += 1
     # finally, we go through all the 'G_primal' nodes and check if there are edges with 'weird' directions within a radius of 3
-    # these outlier directions are then flipped (but only flipped once); this works well in complex newtroks (e.g., Lena Delta),
-    # but nor in meandering rivers
+    # these outlier directions are then flipped (but only flipped once); this works well in complex networks (e.g., Lena Delta),
+    # but not in meandering rivers
     if flip_outlier_edges:
         edges_flipped = []
         for main_node in G_primal.nodes:
@@ -1585,6 +1620,24 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=Fals
     # need to make sure that the linestring coordinates and the half widths are listed in sync with the edge directions:
     flip_coords_and_widths(D_primal)
     D_primal = set_width_weights(D_primal)
+    # sometimes there are sink nodes in D_primal (in addition to the end point) that need to be eliminated:
+    sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
+    if len(sinks) > 0:
+        for sink in sinks:
+            if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
+                edges = [(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]
+                D_temp = D_primal.copy()
+                for edge in edges:
+                    # Remove the existing edge
+                    D_temp.remove_edge(edge[0], edge[1], edge[2])
+                    # Add the edge in the opposite direction
+                    D_temp.add_edge(edge[1], edge[0], edge[2])
+                    if len(list(nx.simple_cycles(D_temp))) == 0:
+                        print('flipping a flow directions in D_primal')
+                        D_primal.add_edge(edge[1], edge[0], edge[2])
+                        for key in D_primal[edge[0]][edge[1]][edge[2]].keys():
+                            D_primal[edge[1]][edge[0]][edge[2]][key] = D_primal[edge[0]][edge[1]][edge[2]][key]
+                        D_primal.remove_edge(edge[0], edge[1], edge[2])
     return D_primal
 
 def set_width_weights(G_primal):
@@ -1890,9 +1943,10 @@ def plot_directed_graph(D_primal, mndwi, left_utm_x, right_utm_x, lower_utm_y, u
         plt.text(D_primal.nodes()[node]['geometry'].xy[0][0]+100, D_primal.nodes()[node]['geometry'].xy[1][0], str(node))
     # plot edges:    
     for s,e,d in D_primal.edges:
-        x = D_primal[s][e][d]['geometry'].xy[0]
-        y = D_primal[s][e][d]['geometry'].xy[1]
-        plt.plot(x, y, 'r', alpha=0.5)
+        if 'geometry' in D_primal[s][e][d].keys():
+            x = D_primal[s][e][d]['geometry'].xy[0]
+            y = D_primal[s][e][d]['geometry'].xy[1]
+            plt.plot(x, y, 'r', alpha=0.5)
     # plot main path:
     if edge_path:
         for s,e,d in edge_path:
@@ -2090,6 +2144,43 @@ def get_ch_and_bar_areas(gdf, xmin, xmax, ymin, ymax):
         ch_belts.append(ch_belt)
         dates.append(date)
     return dates, all_bars, chs, ch_belts, bar_areas, ch_areas
+
+def get_all_channel_widths(D_primal):
+    widths = []
+    for s,e,d in D_primal.edges:
+        key1 = list(D_primal[s][e][d]['half_widths'].keys())[0]
+        key2 = list(D_primal[s][e][d]['half_widths'].keys())[1]
+        w1 = D_primal[s][e][d]['half_widths'][key1]
+        w2 = D_primal[s][e][d]['half_widths'][key2]
+        widths += list(w1+w2)
+    return widths
+
+def gdfs_from_D_primal(D_primal, dataset):
+    """
+    Create two geodataframes (one for nodes and one for edges) from D_primal
+    If you want to save the edge dataframe as a shapefile, you need to drop the 'widths' column
+    """
+    # Extract nodes
+    nodes = {node: data['geometry'] for node, data in D_primal.nodes(data=True)}
+    node_df = geopandas.GeoDataFrame(nodes.items(), columns=['node_id', 'geometry'], 
+                                     crs=dataset.crs.to_string())
+    # Extract edges
+    edges = []
+    for s, e, d, data in D_primal.edges(data=True, keys=True):
+        edge_attrs = {'source': s, 'target': e, 'key': d}
+        for key, attr in data.items():
+            if key == 'mm_len':
+                edge_attrs['mm_len'] = attr
+            if key == 'width':
+                edge_attrs['width'] = attr
+            if key == 'half_widths':
+                key1 = list(attr.keys())[0]
+                key2 = list(attr.keys())[1]
+                edge_attrs['widths'] = attr[key1] + attr[key2]
+        edge_geom = data['geometry']
+        edges.append({'geometry': edge_geom, **edge_attrs})
+    edge_df = geopandas.GeoDataFrame(edges, crs=dataset.crs.to_string())
+    return node_df, edge_df
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
