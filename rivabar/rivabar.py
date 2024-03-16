@@ -147,8 +147,6 @@ def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, up
     y = np.array(list(G_primal[start_ind][end_ind][0]['geometry'].xy[1]))
     tree = KDTree(np.vstack((x, y)).T)
     ind = tree.query(np.reshape([x1, y1], (1, -1)))[1][0][0]
-    # ind = np.where((x==x1) & (y==y1))[0]
-    print('ind: '+str(ind))
     if ind == 1:
         point = Point(x1, y1)
         line = LineString(np.vstack((x[ind:], y[ind:])).T)
@@ -260,11 +258,48 @@ def read_water_index(dirname, fname, mndwi_threshold):
     lower_utm_y = upper_utm_y + delta_y*nypix
     return mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y
     
-def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type, ratio = 10, 
+def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type, 
     ch_belt_smooth_factor = 1e9, remove_smaller_components = False, delete_pixels_polys = False, 
-    n_pixels_per_channel = 10, mndwi_threshold = 0.01, small_hole_threshold = 64, min_g_primal_length = 100000):
+    ch_belt_half_width = 2000, mndwi_threshold = 0.01, small_hole_threshold = 64, 
+    min_g_primal_length = 100000, solidity_filter=True, radius = 50):
     """
     Extract channel centrelines and banks from a georeferenced image.
+
+    Args:
+
+        fname: filename
+        dirname: name of directory
+        start_x: estimate of UTM x coordinate of start point
+        start_y: estimate of UTM y coordinate of start point
+        end_x: estimate of UTM x coordinate of end point
+        end_y: estimate of UTM y coordinate of end point
+        file_type: type of file used as input; it can be 'water_index' or something else if using Landsat bands
+        ch_belt_smooth_factor: smoothing factor for getting a channel belt centerline
+        remove_smaller_components: remove small components from water index image if true
+        delete_pixels_polys: list of polygons or 'False'; set pixels to zero in areas defined by polygons
+        ch_belt_half_width: half channel belt width in pixels, used to define area of interest along channel
+        mndwi_threshold: value for thresholding water index image (default is 0.01)
+        small_hole_threshold: remove holes in water index image that are smaller than this value (in pixels); affects size of islands detected
+        min_g_primal_length: minimum length of centerline graph, in meters, measured over all edges; processing is stopped if graph is not long enough (default is 100 km)
+        solidity_filter: if 'True', objects in the water index image that have a lower solidity than 0.2 will be removed; 
+            good for cleaning up complex water bodies but can be a problem when those bodies are connected to the river (e.g., parts of the Amazon)
+        radius: defines the graph neighborhood of the main path in which nodes will be included. Default is 50; this might need to be increased
+            when working with complex networks
+
+    Returns:
+
+        D_primal: directed multigraph that describes the channel centerline network and tries to capture the flow directions
+        G_rook: rook neighborhood graph of the 'islands' that make up the channel belt; has only two elements (the two banks) if there are no islands / bars
+        G_primal: undirected multigraph that describes the channel centerline network; only returned for QC / testing purposes
+        mndwi: water index image that was used in the processing
+        dataset: rasterio dataset
+        left_utm_x: UTM x coordinate of the left edge of the image
+        right_utm_x: UTM x coordinate of the right edge of the image
+        lower_utm_y: UTM y coordinate of the lower edge of the image
+        upper_utm_y: UTM y coordinate of the upper edge of the image
+        xs: x coordinates (UTM) of the smoothed channel belt centerline
+        ys: y coordinates (UTM) of the smoothed channel belt centerline
+
     """
     if file_type == 'water_index': # single water index raster
         with rasterio.open(dirname + fname) as dataset:
@@ -299,11 +334,14 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         mndwi_labels = label(mndwi)
         rp = regionprops_table(mndwi_labels, properties=['label', 'area', 'solidity'])
         df = pd.DataFrame(rp)
-        df = df.sort_values('area', ascending=False)
         mndwi = np.zeros(np.shape(mndwi))
-        for ind in df.index[df['solidity'] < 0.2]:
-            mndwi[mndwi_labels == ind+1] = 1
-        # mndwi[mndwi_labels == df.loc[0, 'label']] = 1
+        if solidity_filter:
+            df = df.sort_values('area', ascending=False)
+            for ind in df.index[df['solidity'] < 0.2]:
+                mndwi[mndwi_labels == ind+1] = 1
+        else:
+            df = df.sort_values('area', ascending=False, ignore_index=True)
+            mndwi[mndwi_labels == df.loc[0, 'label']] = 1
     print('running skeletonization')
     if np.nanmax(mndwi) != np.nanmin(mndwi):
         try:
@@ -373,10 +411,6 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
             mndwi = img.astype('bool')
             skeleton = skeletonize(mndwi) # skeletonization
             graph = sknw.build_sknw(skeleton, multi=True) # build multigraph from skeleton
-            # for i in range(len(graph)): # this is needed because 'sknw' doesn't work with large images
-            #     if graph.nodes[i]['pts'][0] < 0 or graph.nodes[i]['pts'][1] < 0:
-            #         print('Image is too large! Try a smaller image.')
-            #         return [], [], [], [], [], [], [], [], [], [], []
             start_ind1, end_ind1, start_ind2, end_ind2 = \
                 find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_x, end_y, \
                                                 left_utm_x, upper_utm_y, delta_x, delta_y)
@@ -470,7 +504,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     print('finding nodes that are within a certain radius of the path')
     nodes = [] 
     for node in tqdm(path):
-        test = nx.generators.ego_graph(graph, node, radius=200)
+        test = nx.generators.ego_graph(graph, node, radius=radius)
         for n in test:
             if n not in nodes:
                 nodes.append(n)
@@ -626,14 +660,14 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     # channel belt centerline:
     xs, ys = resample_and_smooth(xcoords_sm, ycoords_sm, 25, float(ch_belt_smooth_factor))
 
-    # make the channel belt centerline longer at both ends:
-    a1, b1 = getExtrapolatedLine((xs[1], ys[1]), (xs[0], ys[0]), float(ratio)) # use the first two points
-    a2, b2 = getExtrapolatedLine((xs[-2], ys[-2]), (xs[-1], ys[-1]), float(ratio)) # use the last two points
-    xs = np.hstack((b1[0], xs, b2[0]))
-    ys = np.hstack((b1[1], ys, b2[1]))
+    ch_belt_cl = LineString(np.vstack((xs, ys)).T)
+    ch_belt_poly = ch_belt_cl.buffer(ch_belt_half_width)
 
-    # create fairway boundaries:
-    xbound1, ybound1, xbound2, ybound2 = get_fairway_bounds(xs, ys, 10*int(n_pixels_per_channel)*delta_x)
+    # make the channel belt centerline longer at both ends:
+    ratio = 2*ch_belt_half_width/(np.sqrt((xs[1]-xs[0])**2 + (ys[1]-ys[0])**2))
+    a1, b1 = getExtrapolatedLine((xs[1], ys[1]), (xs[0], ys[0]), ratio) # use the first two points
+    ratio = 2*ch_belt_half_width/(np.sqrt((xs[-1]-xs[-2])**2 + (ys[-1]-ys[-2])**2))
+    a2, b2 = getExtrapolatedLine((xs[-2], ys[-2]), (xs[-1], ys[-1]), ratio) # use the last two points
 
     # these are needed so that later we can get rid of the extra line segments at the beginning and end of G_primal:
     xcoords1 = xcoords[0]
@@ -647,14 +681,9 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     main_path = LineString(np.vstack((xcoords, ycoords)).T)
 
     # create polygons for the outer boundaries of the channel belt:
-    poly1 = Polygon(linemerge(MultiLineString([main_path, LineString(np.vstack((xbound2, ybound2)).T), 
-                    LineString(np.vstack((np.array([xcoords[0], xbound2[0]]), np.array([ycoords[0], ybound2[0]]))).T),
-                    LineString(np.vstack((np.array([xcoords[-1], xbound2[-1]]), np.array([ycoords[-1], ybound2[-1]]))).T)])))
-    poly2 = Polygon(linemerge(MultiLineString([main_path, LineString(np.vstack((xbound1, ybound1)).T), 
-                    LineString(np.vstack((np.array([xcoords[0], xbound1[0]]), np.array([ycoords[0], ybound1[0]]))).T),
-                    LineString(np.vstack((np.array([xcoords[-1], xbound1[-1]]), np.array([ycoords[-1], ybound1[-1]]))).T)])))
-    poly1 = poly1.buffer(0)
-    poly2 = poly2.buffer(0)
+    main_polys = split(ch_belt_poly, main_path)
+    poly1 = main_polys.geoms[0]
+    poly2 = main_polys.geoms[1]
 
     # trim down the boundary polygons so that they do not overlap with the channel belt polygons:
     if len(gdf) > 0:
@@ -824,17 +853,18 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         print('primal graph is too short')
         return [], [], [], [], [], [], [], [], [], [], []
 
-    # G_primal, primal_start_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords1, ycoords1, left_utm_x, upper_utm_y, delta_x, delta_y)
-    # G_primal, primal_end_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords2, ycoords2, left_utm_x, upper_utm_y, delta_x, delta_y)
-    # G_primal = remove_dead_ends(G_primal, primal_start_ind, primal_end_ind)
-    # print('start and end nodes in G_primal:')
-    # print(primal_start_ind, primal_end_ind)
+    G_primal, primal_start_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords1, ycoords1, left_utm_x, upper_utm_y, delta_x, delta_y)
+    G_primal, primal_end_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords2, ycoords2, left_utm_x, upper_utm_y, delta_x, delta_y)
+    G_primal = remove_dead_ends(G_primal, primal_start_ind, primal_end_ind)
+    print('start and end nodes in G_primal:')
+    print(primal_start_ind, primal_end_ind)
 
     print('getting bank coordinates for the two main banks')
     utm_coords = []
     x1_poly, y1_poly, ch_map = get_bank_coords(poly1_utm, mndwi, dataset, timer=True)
     x2_poly, y2_poly, ch_map = get_bank_coords(poly2_utm, mndwi, dataset, timer=True)
     # need to lengthen the banklines so that they intersect the main centerline polygons:
+    ratio = ch_belt_half_width*delta_x/(np.sqrt((x1_poly[1]-x1_poly[0])**2 + (y1_poly[1]-y1_poly[0])**2))
     a1, b1 = getExtrapolatedLine((x1_poly[1], y1_poly[1]), (x1_poly[0], y1_poly[0]), float(ratio))
     a2, b2 = getExtrapolatedLine((x1_poly[-2], y1_poly[-2]), (x1_poly[-1], y1_poly[-1]), float(ratio))
     x1_poly = np.hstack((b1[0], x1_poly, b2[0]))
@@ -859,6 +889,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     # x2, y2 = find_longer_segment_coords(Polygon(np.vstack((x2_poly, y2_poly)).T), ind21, ind22, ind21, ind21)
     # utm_coords.append(np.vstack((x1, y1)).T)
     # utm_coords.append(np.vstack((x2, y2)).T)
+
     poly1_split = split(poly1_utm, LineString(np.vstack((x1_poly, y1_poly)).T))
     areas = []
     for geom in poly1_split.geoms:
@@ -922,7 +953,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     # create a directed multigraph based on G_primal:
     xs, ys = convert_to_utm(np.array(xs), np.array(ys), left_utm_x, upper_utm_y, delta_x, delta_y)
     print('creating directed graph')
-    D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys)
+    D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, primal_end_ind)
 
     return D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys
 
@@ -1023,29 +1054,6 @@ def extend_cline(graph, s, e, d):
             x = np.hstack((xs, x[::-1], xe))
             y = np.hstack((ys, y[::-1], ye))
     return x, y
-
-def get_fairway_bounds(x, y, W):
-    """function for finding coordinates of channel banks, given a centerline and a channel width
-    x,y - coordinates of centerline
-    W - channel width
-    outputs:
-    xm, ym - coordinates of channel banks (both left and right banks)"""
-    x1 = x.copy()
-    y1 = y.copy()
-    x2 = x.copy()
-    y2 = y.copy()
-    ns = len(x)
-    dx = np.diff(x); dy = np.diff(y) 
-    ds = np.sqrt(dx**2+dy**2)
-    x1[:-1] = x[:-1] + 0.5*W*np.diff(y)/ds
-    y1[:-1] = y[:-1] - 0.5*W*np.diff(x)/ds
-    x2[:-1] = x[:-1] - 0.5*W*np.diff(y)/ds
-    y2[:-1] = y[:-1] + 0.5*W*np.diff(x)/ds
-    x1[ns-1] = x[ns-1] + 0.5*W*(y[ns-1]-y[ns-2])/ds[ns-2]
-    y1[ns-1] = y[ns-1] - 0.5*W*(x[ns-1]-x[ns-2])/ds[ns-2]
-    x2[ns-1] = x[ns-1] - 0.5*W*(y[ns-1]-y[ns-2])/ds[ns-2]
-    y2[ns-1] = y[ns-1] + 0.5*W*(x[ns-1]-x[ns-2])/ds[ns-2]
-    return x1, y1, x2, y2
 
 def getExtrapolatedLine(p1, p2, ratio):
     'Creates a line extrapolated in p1->p2 direction'
@@ -1313,14 +1321,19 @@ def create_channel_nw_polygon(G_rook):
     two_main_banks = G_rook.nodes[0]['bank_polygon'].union(G_rook.nodes[1]['bank_polygon'])
     difference = two_main_banks.convex_hull.difference(two_main_banks)
     count = 0
-    count = 0
     for geom in difference.geoms:
-        for i in range(2, len(G_rook)):
+        if len(G_rook) > 2:
+            for i in range(2, len(G_rook)):
+                if geom.contains(G_rook.nodes[i]['bank_polygon']):
+                    break
             if geom.contains(G_rook.nodes[i]['bank_polygon']):
                 break
-        if geom.contains(G_rook.nodes[i]['bank_polygon']):
-            break
-        count += 1
+            count += 1
+        else:
+            areas = []
+            for geom in difference.geoms:
+                areas.append(geom.area)
+            count = np.argmax(areas)
     ch_belt = difference.geoms[count]
     exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
     interior = []
@@ -1426,7 +1439,7 @@ def find_longer_segment_coords(polygon, i1, i2, xs, ys):
             else:
                 return segment2.xy[0][::-1], segment2.xy[1][::-1]
 
-def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=False):
+def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, primal_end_ind, flip_outlier_edges=False):
     D_primal = nx.MultiDiGraph()
     for node, data in G_primal.nodes(data=True):
         D_primal.add_node(node, **data)
@@ -1434,16 +1447,16 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=Fals
     x0 = G_rook.nodes()[0]['cl_polygon'].exterior.xy[0]
     y0 = G_rook.nodes()[0]['cl_polygon'].exterior.xy[1]
     # find closest points to first and last points on smoothed centerline (xs and ys):
-    ind1 = find_closest_point(xs[0], ys[0], np.vstack((x0,y0)).T)
-    ind2 = find_closest_point(xs[-1], ys[-1], np.vstack((x0,y0)).T)
+    ind1 = find_closest_point(G_primal.nodes()[primal_start_ind]['geometry'].x, G_primal.nodes()[primal_start_ind]['geometry'].y, np.vstack((x0,y0)).T)
+    ind2 = find_closest_point(G_primal.nodes()[primal_end_ind]['geometry'].x, G_primal.nodes()[primal_end_ind]['geometry'].y, np.vstack((x0,y0)).T)
     # trim the polygon to the segment of interest (= bankline):
     x0, y0 = find_longer_segment_coords(G_rook.nodes()[0]['cl_polygon'], ind1, ind2, xs, ys)
     # x and y coordinates of second major centerline polygon:
     x1 = G_rook.nodes()[1]['cl_polygon'].exterior.xy[0]
     y1 = G_rook.nodes()[1]['cl_polygon'].exterior.xy[1]
     # find closest points to first and last points on smoothed centerline (xs and ys):
-    ind1 = find_closest_point(xs[0], ys[0], np.vstack((x1,y1)).T)
-    ind2 = find_closest_point(xs[-1], ys[-1], np.vstack((x1,y1)).T)
+    ind1 = find_closest_point(G_primal.nodes()[primal_start_ind]['geometry'].x, G_primal.nodes()[primal_start_ind]['geometry'].y, np.vstack((x1,y1)).T)
+    ind2 = find_closest_point(G_primal.nodes()[primal_end_ind]['geometry'].x, G_primal.nodes()[primal_end_ind]['geometry'].y, np.vstack((x1,y1)).T)
     # trim the polygon to the segment of interest (= bankline):
     x1, y1 = find_longer_segment_coords(G_rook.nodes()[1]['cl_polygon'], ind1, ind2, xs, ys)
     # for the two main banklines (defined by (x0,y0) and (x1,y1)), find the G_primal edges that 
@@ -1621,23 +1634,23 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, flip_outlier_edges=Fals
     flip_coords_and_widths(D_primal)
     D_primal = set_width_weights(D_primal)
     # sometimes there are sink nodes in D_primal (in addition to the end point) that need to be eliminated:
-    sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
-    if len(sinks) > 0:
-        for sink in sinks:
-            if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
-                edges = [(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]
-                D_temp = D_primal.copy()
-                for edge in edges:
-                    # Remove the existing edge
-                    D_temp.remove_edge(edge[0], edge[1], edge[2])
-                    # Add the edge in the opposite direction
-                    D_temp.add_edge(edge[1], edge[0], edge[2])
-                    if len(list(nx.simple_cycles(D_temp))) == 0:
-                        print('flipping a flow directions in D_primal')
-                        D_primal.add_edge(edge[1], edge[0], edge[2])
-                        for key in D_primal[edge[0]][edge[1]][edge[2]].keys():
-                            D_primal[edge[1]][edge[0]][edge[2]][key] = D_primal[edge[0]][edge[1]][edge[2]][key]
-                        D_primal.remove_edge(edge[0], edge[1], edge[2])
+    # sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
+    # if len(sinks) > 0:
+    #     for sink in sinks:
+    #         if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
+    #             edges = [(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]
+    #             D_temp = D_primal.copy()
+    #             for edge in edges:
+    #                 # Remove the existing edge
+    #                 D_temp.remove_edge(edge[0], edge[1], edge[2])
+    #                 # Add the edge in the opposite direction
+    #                 D_temp.add_edge(edge[1], edge[0], edge[2])
+    #                 if len(list(nx.simple_cycles(D_temp))) == 0:
+    #                     print('flipping a flow direction in D_primal')
+    #                     D_primal.add_edge(edge[1], edge[0], edge[2])
+    #                     for key in D_primal[edge[0]][edge[1]][edge[2]].keys():
+    #                         D_primal[edge[1]][edge[0]][edge[2]][key] = D_primal[edge[0]][edge[1]][edge[2]][key]
+    #                     D_primal.remove_edge(edge[0], edge[1], edge[2])
     return D_primal
 
 def set_width_weights(G_primal):
@@ -2181,6 +2194,31 @@ def gdfs_from_D_primal(D_primal, dataset):
         edges.append({'geometry': edge_geom, **edge_attrs})
     edge_df = geopandas.GeoDataFrame(edges, crs=dataset.crs.to_string())
     return node_df, edge_df
+
+def crop_geotiff(input_file, output_file, row_off, col_off, max_rows=2**16//2, max_cols=2**16//2):
+    # Open the input GeoTIFF file
+    with rasterio.open(input_file) as src:
+        # Define the cropping window
+        width = src.width
+        height = src.height
+        max_rows = min(height-row_off, max_rows)
+        max_cols = min(height-col_off, max_cols)
+        crop_window = rasterio.windows.Window(col_off, row_off, max_cols, max_rows)
+        
+        # Read the cropped portion of the image
+        cropped_data = src.read(window=crop_window)
+        
+        # Update metadata for the cropped image
+        crop_meta = src.meta.copy()
+        crop_meta.update({
+            'width': max_cols,
+            'height': max_rows,
+            'transform': src.window_transform(crop_window)
+        })
+        
+        # Write the cropped image to the output GeoTIFF file
+        with rasterio.open(output_file, 'w', **crop_meta) as dst:
+            dst.write(cropped_data)
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
