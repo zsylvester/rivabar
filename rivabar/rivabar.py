@@ -1929,15 +1929,19 @@ def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
     if type(non_overlap_1) == MultiLineString:
         x_utm1, y_utm1 = [], []
         for geom in non_overlap_1.geoms:
-            x_utm1.extend(geom.xy[0])
-            y_utm1.extend(geom.xy[1])
+            # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
+            if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
+                x_utm1.extend(geom.xy[0])
+                y_utm1.extend(geom.xy[1])
     else:
         x_utm1, y_utm1 = non_overlap_1.xy[0], non_overlap_1.xy[1]
     if type(non_overlap_2) == MultiLineString:
         x_utm2, y_utm2 = [], []
         for geom in non_overlap_2.geoms:
-            x_utm2.extend(geom.xy[0])
-            y_utm2.extend(geom.xy[1])
+            # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
+            if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
+                x_utm2.extend(geom.xy[0])
+                y_utm2.extend(geom.xy[1])
     else:
         x_utm2, y_utm2 = non_overlap_2.xy[0], non_overlap_2.xy[1]
     return x, y, x_utm1, y_utm1, x_utm2, y_utm2
