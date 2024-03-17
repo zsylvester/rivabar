@@ -26,6 +26,7 @@ from libpysal import weights
 import geopandas
 import momepy
 from itertools import combinations, permutations
+import pickle
 import warnings
 
 def convert_to_utm(x, y, left_utm_x, upper_utm_y, delta_x, delta_y):
@@ -952,6 +953,12 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
 
     # create a directed multigraph based on G_primal:
     xs, ys = convert_to_utm(np.array(xs), np.array(ys), left_utm_x, upper_utm_y, delta_x, delta_y)
+    # sometimes xs and ys need to be flipped (I have no idea why):
+    start_point_dist = np.sqrt((xs[0]-start_x)**2 + (ys[0]-start_y)**2)
+    end_point_dist = np.sqrt((xs[0]-end_x)**2 + (ys[0]-end_y)**2)
+    if end_point_dist < start_point_dist:
+        xs = xs[::-1]; ys = ys[::-1]
+
     print('creating directed graph')
     D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, primal_end_ind)
 
@@ -1634,7 +1641,14 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
     flip_coords_and_widths(D_primal)
     D_primal = set_width_weights(D_primal)
     # sometimes there are sink nodes in D_primal (in addition to the end point) that need to be eliminated:
-    # sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
+    sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
+    if len(sinks) > 1:
+        print('there is more than one sink in D_primal!')
+        print('these sinks are: ' + str(sinks))
+    cycles = list(nx.simple_cycles(D_primal))
+    if len(cycles) > 0:
+        print('there are ' + str(len(cycles)) + 'cycles in D_primal!')
+        print('these cycles are: ' + str(cycles))
     # if len(sinks) > 0:
     #     for sink in sinks:
     #         if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
@@ -1868,11 +1882,16 @@ def traverse_multigraph(G, start_node, subpath_depth=5):
 def find_start_node(D_primal):
     inds = np.where(np.array(list(nx.degree(D_primal, D_primal.nodes)))[:,1] < 3)[0]
     nodes = np.array(list(nx.degree(D_primal, D_primal.nodes)))[:,0][inds]
+    sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
+    nodes = np.unique(list(nodes) + sinks)
     pairs = list(permutations(nodes, 2))
+    start_node = None
     for pair in pairs:
         if nx.has_path(D_primal, *pair):
             start_node = pair[0]
             break
+    if start_node == None:
+        print("could not find start node!")
     return start_node, inds
 
 def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
@@ -2219,6 +2238,22 @@ def crop_geotiff(input_file, output_file, row_off, col_off, max_rows=2**16//2, m
         # Write the cropped image to the output GeoTIFF file
         with rasterio.open(output_file, 'w', **crop_meta) as dst:
             dst.write(cropped_data)
+
+def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername):
+    ch_nw_poly = create_channel_nw_polygon(G_rook)
+    gs = geopandas.GeoSeries(ch_nw_poly)
+    gs.crs = dataset.crs.data['init']
+    gs.to_file(dirname + rivername + '_channels.shp')
+
+    node_df, edge_df = gdfs_from_D_primal(D_primal, dataset)
+    edge_df = edge_df.drop('widths', axis=1)
+    node_df.to_file(dirname + rivername + "_node_df.shp")
+    edge_df.to_file(dirname + rivername + "_edge_df.shp")
+
+    with open(dirname + rivername + "_G_rook.pickle", "wb") as f:
+        pickle.dump(G_rook, f)
+    with open(dirname + rivername +"_D_primal.pickle", "wb") as f:
+        pickle.dump(D_primal, f)
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
