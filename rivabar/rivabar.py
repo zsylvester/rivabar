@@ -7,8 +7,6 @@ from scipy import ndimage
 from scipy.signal import savgol_filter
 import scipy.interpolate
 from scipy.interpolate import CubicSpline
-from scipy.spatial import distance
-from scipy.spatial import cKDTree
 from tqdm import tqdm, trange
 import pandas as pd
 from skimage.morphology import skeletonize, remove_small_holes
@@ -20,7 +18,7 @@ import rasterio
 from rasterio.plot import adjust_band
 from rasterio import features
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from shapely.geometry import Point, Polygon, LineString, MultiPolygon, MultiLineString, GeometryCollection, MultiPoint
+from shapely.geometry import Point, Polygon, LineString, MultiPolygon, MultiLineString, GeometryCollection
 from shapely.ops import polygonize_full, split, linemerge, nearest_points, unary_union
 from libpysal import weights
 import geopandas
@@ -2251,7 +2249,7 @@ def crop_geotiff(input_file, output_file, row_off, col_off, max_rows=2**16//2, m
         width = src.width
         height = src.height
         max_rows = min(height-row_off, max_rows)
-        max_cols = min(height-col_off, max_cols)
+        max_cols = min(width-col_off, max_cols)
         crop_window = rasterio.windows.Window(col_off, row_off, max_cols, max_rows)
         
         # Read the cropped portion of the image
@@ -2284,6 +2282,23 @@ def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername):
         pickle.dump(G_rook, f)
     with open(dirname + rivername +"_D_primal.pickle", "wb") as f:
         pickle.dump(D_primal, f)
+
+def merge_and_plot_channel_polygons(fnames):
+    polys = []
+    for fname in fnames:
+        gdf = geopandas.read_file(fname)
+        poly = gdf.iloc[0]['geometry'].buffer(0) # need to add case when there are multiple polygons
+        polys.append(poly)
+    big_poly = polys[0]
+    for polygon in polys[1:]:
+        big_poly = big_poly.union(polygon)
+    plt.figure()
+    for geom in big_poly.geoms:
+        plt.fill(geom.exterior.xy[0], geom.exterior.xy[1], color='cornflowerblue')
+        for interior in geom.interiors:
+            plt.fill(interior.xy[0], interior.xy[1], 'w')
+    plt.axis('equal')
+    return big_poly
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
