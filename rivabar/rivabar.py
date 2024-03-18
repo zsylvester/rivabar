@@ -1320,35 +1320,39 @@ def read_and_plot_im(dirname, fname):
     plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray')
     return im, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
 
-def create_channel_nw_polygon(G_rook):
+def create_channel_nw_polygon(G_rook, dx=30):
     """
     create a channel network polygon - a single polygon with holes where there are islands / bars
 
     """
     two_main_banks = G_rook.nodes[0]['bank_polygon'].union(G_rook.nodes[1]['bank_polygon'])
     difference = two_main_banks.convex_hull.difference(two_main_banks)
-    count = 0
-    for geom in difference.geoms:
-        if len(G_rook) > 2:
+    if len(G_rook) > 2:
+        count = 0
+        for geom in difference.geoms:
             for i in range(2, len(G_rook)):
                 if geom.contains(G_rook.nodes[i]['bank_polygon']):
                     break
             if geom.contains(G_rook.nodes[i]['bank_polygon']):
                 break
             count += 1
-        else:
-            areas = []
-            for geom in difference.geoms:
-                areas.append(geom.area)
-            count = np.argmax(areas)
-    ch_belt = difference.geoms[count]
-    exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
-    interior = []
-    for i in range(2, len(G_rook)):
-        x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
-        y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
-        interior.append(list(map(tuple, np.vstack((x,y)).T)))
-    ch_nw_poly = Polygon(exterior, holes=interior)
+        ch_belt = difference.geoms[count]
+        exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
+        interior = []
+        for i in range(2, len(G_rook)):
+            x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
+            y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+            interior.append(list(map(tuple, np.vstack((x,y)).T)))
+        ch_nw_poly = Polygon(exterior, holes=interior)
+    else: # if there are no islands
+        cline = G_rook.nodes[0]['cl_polygon'].intersection(G_rook.nodes[1]['cl_polygon'])
+        inds = []
+        for i in range(len(difference.geoms)):
+            if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
+                inds.append(i)
+        ch_nw_poly = difference.geoms[inds[0]]
+        for i in inds[1:]:
+            ch_nw_poly = ch_nw_poly.union(difference.geoms[i])
     return ch_nw_poly
 
 def convert_geographic_proj_to_utm(dirname, fname, dstCrs):
@@ -1930,20 +1934,25 @@ def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
         x_utm1, y_utm1 = [], []
         for geom in non_overlap_1.geoms:
             # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
-            if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
-                x_utm1.extend(geom.xy[0])
-                y_utm1.extend(geom.xy[1])
+            # if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
+            x_utm1.extend(geom.xy[0])
+            y_utm1.extend(geom.xy[1])
     else:
         x_utm1, y_utm1 = non_overlap_1.xy[0], non_overlap_1.xy[1]
     if type(non_overlap_2) == MultiLineString:
         x_utm2, y_utm2 = [], []
         for geom in non_overlap_2.geoms:
             # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
-            if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
-                x_utm2.extend(geom.xy[0])
-                y_utm2.extend(geom.xy[1])
+            # if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
+            x_utm2.extend(geom.xy[0])
+            y_utm2.extend(geom.xy[1])
     else:
         x_utm2, y_utm2 = non_overlap_2.xy[0], non_overlap_2.xy[1]
+    buffered_centerline = LineString(np.vstack((x,y)).T).buffer(1000)
+    bankline1 = buffered_centerline.intersection(LineString(np.vstack((x_utm1, y_utm1)).T))
+    x_utm1 = bankline1.xy[0]; y_utm1 = bankline1.xy[1]
+    bankline2 = buffered_centerline.intersection(LineString(np.vstack((x_utm2, y_utm2)).T))
+    x_utm2 = bankline2.xy[0]; y_utm2 = bankline2.xy[1]
     return x, y, x_utm1, y_utm1, x_utm2, y_utm2
 
 def get_channel_widths_along_path(D_primal, path):
