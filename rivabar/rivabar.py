@@ -1327,6 +1327,7 @@ def create_channel_nw_polygon(G_rook, dx=30):
     """
     two_main_banks = G_rook.nodes[0]['bank_polygon'].union(G_rook.nodes[1]['bank_polygon'])
     difference = two_main_banks.convex_hull.difference(two_main_banks)
+    cline = G_rook.nodes[0]['cl_polygon'].intersection(G_rook.nodes[1]['cl_polygon'])
     if len(G_rook) > 2:
         count = 0
         for geom in difference.geoms:
@@ -1337,15 +1338,31 @@ def create_channel_nw_polygon(G_rook, dx=30):
                 break
             count += 1
         ch_belt = difference.geoms[count]
-        exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
-        interior = []
-        for i in range(2, len(G_rook)):
-            x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
-            y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
-            interior.append(list(map(tuple, np.vstack((x,y)).T)))
-        ch_nw_poly = Polygon(exterior, holes=interior)
+        for i in range(len(difference.geoms)):
+            if i != count:
+                if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
+                    ch_belt = ch_belt.union(difference.geoms[i])
+        if type(ch_belt) == Polygon:
+            exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
+            interior = []
+            for i in range(2, len(G_rook)):
+                x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
+                y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+                interior.append(list(map(tuple, np.vstack((x,y)).T)))
+            ch_nw_poly = Polygon(exterior, holes=interior)
+        else:
+            polys = []
+            for geom in ch_belt.geoms:
+                exterior = np.vstack((geom.exterior.xy[0], geom.exterior.xy[1])).T
+                interior = []
+                for i in range(2, len(G_rook)):
+                    if geom.contains(G_rook.nodes[i]['bank_polygon']):
+                        x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
+                        y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+                        interior.append(list(map(tuple, np.vstack((x,y)).T)))
+                polys.append(Polygon(exterior, holes=interior))
+            ch_nw_poly = MultiPolygon(polys)
     else: # if there are no islands
-        cline = G_rook.nodes[0]['cl_polygon'].intersection(G_rook.nodes[1]['cl_polygon'])
         inds = []
         for i in range(len(difference.geoms)):
             if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
