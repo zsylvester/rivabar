@@ -1242,10 +1242,6 @@ def set_half_channel_widths(G_primal, G_rook, dataset, mndwi):
                         pass
 
 def save_shapefiles(dirname, fname, G_rook, dataset, fname_add_on=''):
-    # ch_nw_poly = create_channel_nw_polygon(G_rook)
-    # gs = geopandas.GeoSeries(ch_nw_poly)
-    # gs.crs = dataset.crs.data['init']
-    # gs.to_file(dirname + fname[:-4] + '_channels.shp')
     gs = geopandas.GeoSeries(G_rook.nodes()[0]['bank_polygon'])
     gs.crs = 'epsg:'+str(dataset.crs.to_epsg())
     gs.to_file(dirname+fname[:-4]+fname_add_on+'_rb.shp')
@@ -1335,15 +1331,15 @@ def create_channel_nw_polygon(G_rook, dx=30):
             if geom.contains(G_rook.nodes[i]['bank_polygon']):
                 break
             count += 1
-        ch_belt = difference.geoms[count]
-        for i in range(len(difference.geoms)):
+        ch_belt = difference.geoms[count] # channel belt, with no islands
+        for i in range(len(difference.geoms)): # add small pieces that got detached
             if i != count:
                 if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
                     ch_belt = ch_belt.union(difference.geoms[i])
         if type(ch_belt) == Polygon:
             exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
             interior = []
-            for i in range(2, len(G_rook)):
+            for i in range(2, len(G_rook)): # islands
                 x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
                 y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
                 interior.append(list(map(tuple, np.vstack((x,y)).T)))
@@ -1353,8 +1349,8 @@ def create_channel_nw_polygon(G_rook, dx=30):
             for geom in ch_belt.geoms:
                 exterior = np.vstack((geom.exterior.xy[0], geom.exterior.xy[1])).T
                 interior = []
-                for i in range(2, len(G_rook)):
-                    if geom.contains(G_rook.nodes[i]['bank_polygon']):
+                for i in range(2, len(G_rook)): # islands
+                    if geom.overlaps(G_rook.nodes[i]['bank_polygon']) or geom.contains(G_rook.nodes[i]['bank_polygon']):
                         x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
                         y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
                         interior.append(list(map(tuple, np.vstack((x,y)).T)))
