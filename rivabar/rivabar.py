@@ -3,6 +3,9 @@ import sys
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.path import Path
+from matplotlib.patches import PathPatch
+from matplotlib.collections import PatchCollection
 from scipy import ndimage
 from scipy.signal import savgol_filter
 import scipy.interpolate
@@ -19,6 +22,7 @@ from rasterio.plot import adjust_band
 from rasterio import features
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import Point, Polygon, LineString, MultiPolygon, MultiLineString, GeometryCollection
+from shapely.geometry.polygon import InteriorRingSequence
 from shapely.ops import polygonize_full, split, linemerge, nearest_points, unary_union
 from libpysal import weights
 import geopandas
@@ -26,6 +30,7 @@ import momepy
 from itertools import combinations, permutations
 import pickle
 import warnings
+from datetime import datetime
 
 def convert_to_utm(x, y, left_utm_x, upper_utm_y, delta_x, delta_y):
     """
@@ -127,6 +132,7 @@ def find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_
 
 def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, upper_utm_y, delta_x, delta_y):
     x1, y1 = convert_to_utm(x1, y1, left_utm_x, upper_utm_y, delta_x, delta_y)
+    # collect UTM coordinates for edges in G_primal:
     edge_utm_xs = []
     edge_utm_ys = []
     ss = []
@@ -138,26 +144,56 @@ def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, up
         edge_utm_ys += list(y)
         ss += [s] * len(x)
         es += [e] * len(x)
+    # create KDTree for edge coordinates:
     tree = KDTree(np.vstack((edge_utm_xs, edge_utm_ys)).T)
+    # find the edge that is closest to (x1, y1):
     si = tree.query(np.reshape([x1, y1], (1, -1)))[1][0][0]
     start_ind = ss[si]
     end_ind = es[si]
+    # coordinates of the closest edge:
     x = np.array(list(G_primal[start_ind][end_ind][0]['geometry'].xy[0]))
     y = np.array(list(G_primal[start_ind][end_ind][0]['geometry'].xy[1]))
+    # KDTree for the coordinates of the closest edge:
     tree = KDTree(np.vstack((x, y)).T)
+    # find point that is closest to (x1, y1):
     ind = tree.query(np.reshape([x1, y1], (1, -1)))[1][0][0]
-    if ind == 1:
-        point = Point(x1, y1)
-        line = LineString(np.vstack((x[ind:], y[ind:])).T)
-        G_primal.nodes()[start_ind]['geometry'] = point
-        G_primal[start_ind][end_ind][0]['geometry'] = line
-        node = start_ind
-    else:
-        point = Point(x1, y1)
-        line = LineString(np.vstack((x[:ind+1], y[:ind+1])).T)
-        G_primal.nodes()[end_ind]['geometry'] = point
-        G_primal[start_ind][end_ind][0]['geometry'] = line
-        node = end_ind
+    start_ind_x = G_primal.nodes()[start_ind]['geometry'].xy[0][0]
+    start_ind_y = G_primal.nodes()[start_ind]['geometry'].xy[1][0]
+    end_ind_x = G_primal.nodes()[end_ind]['geometry'].xy[0][0]
+    end_ind_y = G_primal.nodes()[end_ind]['geometry'].xy[1][0]
+    start_dist = np.sqrt((start_ind_x - x1)**2 + (start_ind_y - y1)**2)
+    end_dist = np.sqrt((end_ind_x - x1)**2 + (end_ind_y - y1)**2)
+    if len(x) > 2:
+        if ind == 1: # (x1,y1) is the second point on the G_primal edge of interest
+            point = Point(x1, y1)
+            line = LineString(np.vstack((x[ind:], y[ind:])).T)
+            if len(list(nx.neighbors(G_primal, start_ind)))==1 or start_ind == 0:
+                G_primal.nodes()[start_ind]['geometry'] = point
+                node = start_ind
+            else:
+                G_primal.nodes()[end_ind]['geometry'] = point
+                node = end_ind
+            G_primal[start_ind][end_ind][0]['geometry'] = line
+        elif ind == 0: # (x1,y1) is the first point on the G_primal edge of interest
+            if start_dist < end_dist:
+                G_primal.remove_node(end_ind)
+                node = start_ind
+            else:
+                G_primal.remove_node(start_ind)
+                node = end_ind
+        else: # otherwise (x1, y1) is the end point
+            point = Point(x1, y1)
+            line = LineString(np.vstack((x[:ind+1], y[:ind+1])).T)
+            G_primal.nodes()[end_ind]['geometry'] = point
+            G_primal[start_ind][end_ind][0]['geometry'] = line
+            node = end_ind
+    if len(x) == 2:
+        if ind == 0:
+            G_primal.remove_node(end_ind)
+            node = start_ind
+        if ind == 1:
+            G_primal.remove_node(start_ind)
+            node = end_ind
     return G_primal, node
 
 def convert_to_uint8(channel):
@@ -256,11 +292,54 @@ def read_water_index(dirname, fname, mndwi_threshold):
     right_utm_x = left_utm_x + delta_x*nxpix
     lower_utm_y = upper_utm_y + delta_y*nypix
     return mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y
+
+def create_mndwi(dirname, fname, file_type, mndwi_threshold=0.01, delete_pixels_polys=False, small_hole_threshold=64, remove_smaller_components=True, solidity_filter=False):
+    if file_type == 'water_index': # single water index raster
+        with rasterio.open(dirname + fname) as dataset:
+            mndwi = dataset.read(1)
+            mndwi[mndwi > float(mndwi_threshold)] = 1
+            mndwi[mndwi != 1] = 0
+            left_utm_x = dataset.transform[2]
+            upper_utm_y = dataset.transform[5]
+            delta_x = dataset.transform[0]
+            delta_y = dataset.transform[4]
+        nxpix = mndwi.shape[1]
+        nypix = mndwi.shape[0]
+        right_utm_x = left_utm_x + delta_x*nxpix
+        lower_utm_y = upper_utm_y + delta_y*nypix
+    else: # single Landsat TIF file or multiple Landsat TIF files
+        print('reading Landsat data')
+        if type(mndwi_threshold) == str:
+            mndwi_threshold = float(mndwi_threshold)
+        equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data(dirname, fname, mndwi_threshold = mndwi_threshold)
+    if delete_pixels_polys:
+        rst_arr = mndwi.astype('uint32').copy()
+        shapes = ((geom, value) for geom, value in zip(delete_pixels_polys, np.ones((len(delete_pixels_polys),))))
+        mndwi = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)
+    if max(np.shape(mndwi)) > 2**16//2:
+        print('maximum dimension of input image needs to be smaller than 32768!')
+        return None
+    print('removing small holes')
+    mndwi = remove_small_holes(mndwi.astype('bool'), small_hole_threshold) # remove small holes
+    print('removing small components')
+    if remove_smaller_components:
+        mndwi_labels = label(mndwi)
+        rp = regionprops_table(mndwi_labels, properties=['label', 'area', 'solidity'])
+        df = pd.DataFrame(rp)
+        mndwi = np.zeros(np.shape(mndwi))
+        if solidity_filter:
+            df = df.sort_values('area', ascending=False)
+            for ind in df.index[df['solidity'] < 0.2]:
+                mndwi[mndwi_labels == ind+1] = 1
+        else:
+            df = df.sort_values('area', ascending=False, ignore_index=True)
+            mndwi[mndwi_labels == df.loc[0, 'label']] = 1
+    return mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y, delta_x, delta_y, dataset
     
 def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type, 
     ch_belt_smooth_factor = 1e9, remove_smaller_components = False, delete_pixels_polys = False, 
-    ch_belt_half_width = 2000, mndwi_threshold = 0.01, small_hole_threshold = 64, 
-    min_g_primal_length = 100000, solidity_filter=True, radius = 50):
+    ch_belt_half_width = 2000, mndwi_threshold = 0.01, small_hole_threshold = 64, plot_D_primal = False,
+    min_g_primal_length = 100000, solidity_filter=True, radius = 50, min_main_path_length = 2000, flip_outlier_edges=False):
     """
     Extract channel centrelines and banks from a georeferenced image.
 
@@ -300,47 +379,11 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         ys: y coordinates (UTM) of the smoothed channel belt centerline
 
     """
-    if file_type == 'water_index': # single water index raster
-        with rasterio.open(dirname + fname) as dataset:
-            mndwi = dataset.read(1)
-            mndwi[mndwi > float(mndwi_threshold)] = 1
-            mndwi[mndwi != 1] = 0
-            left_utm_x = dataset.transform[2]
-            upper_utm_y = dataset.transform[5]
-            delta_x = dataset.transform[0]
-            delta_y = dataset.transform[4]
-        nxpix = mndwi.shape[1]
-        nypix = mndwi.shape[0]
-        right_utm_x = left_utm_x + delta_x*nxpix
-        lower_utm_y = upper_utm_y + delta_y*nypix
-    else: # single Landsat TIF file or multiple Landsat TIF files
-        print('reading Landsat data')
-        if type(mndwi_threshold) == str:
-            mndwi_threshold = float(mndwi_threshold)
-        equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data(dirname, fname, mndwi_threshold = mndwi_threshold)
-    if delete_pixels_polys:
-        rst_arr = mndwi.astype('uint32').copy()
-        shapes = ((geom, value) for geom, value in zip(delete_pixels_polys, np.ones((len(delete_pixels_polys),))))
-        mndwi = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)
-
-    if max(np.shape(mndwi)) > 2**16//2:
-        print('maximum dimension of input image needs to be smaller than 32768!')
+    mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y, delta_x, delta_y, dataset = create_mndwi(dirname=dirname, fname=fname, file_type=file_type, mndwi_threshold=mndwi_threshold, delete_pixels_polys=delete_pixels_polys,\
+                         small_hole_threshold=small_hole_threshold, remove_smaller_components=remove_smaller_components, solidity_filter=solidity_filter)
+    if mndwi is None:
         return [], [], [], [], [], [], [], [], [], [], []
-    
-    print('removing small holes')
-    mndwi = remove_small_holes(mndwi.astype('bool'), small_hole_threshold) # remove small holes
-    if remove_smaller_components:
-        mndwi_labels = label(mndwi)
-        rp = regionprops_table(mndwi_labels, properties=['label', 'area', 'solidity'])
-        df = pd.DataFrame(rp)
-        mndwi = np.zeros(np.shape(mndwi))
-        if solidity_filter:
-            df = df.sort_values('area', ascending=False)
-            for ind in df.index[df['solidity'] < 0.2]:
-                mndwi[mndwi_labels == ind+1] = 1
-        else:
-            df = df.sort_values('area', ascending=False, ignore_index=True)
-            mndwi[mndwi_labels == df.loc[0, 'label']] = 1
+
     print('running skeletonization')
     if np.nanmax(mndwi) != np.nanmin(mndwi):
         try:
@@ -503,7 +546,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     print('finding nodes that are within a certain radius of the path')
     nodes = [] 
     for node in tqdm(path):
-        test = nx.generators.ego_graph(graph, node, radius=radius)
+        test = nx.generators.ego_graph(graph, node, radius=int(radius))
         for n in test:
             if n not in nodes:
                 nodes.append(n)
@@ -591,7 +634,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     ycoords_sm = savgol_filter(ycoords, 21, 3)
     xcoords_sm, ycoords_sm = resample_and_smooth(xcoords_sm, ycoords_sm, 25, 100000)
     main_path = LineString(np.vstack((xcoords, ycoords)).T)
-    if main_path.length < 2000:  # this should be a parameter
+    if main_path.length < min_main_path_length:  # this should be a parameter
         print('main path is too short')
         return [], [], [], [], [], [], [], [], [], [], []
     
@@ -662,19 +705,17 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     ch_belt_cl = LineString(np.vstack((xs, ys)).T)
     ch_belt_poly = ch_belt_cl.buffer(ch_belt_half_width)
 
-    # make the channel belt centerline longer at both ends:
-    ratio = 2*ch_belt_half_width/(np.sqrt((xs[1]-xs[0])**2 + (ys[1]-ys[0])**2))
-    a1, b1 = getExtrapolatedLine((xs[1], ys[1]), (xs[0], ys[0]), ratio) # use the first two points
-    ratio = 2*ch_belt_half_width/(np.sqrt((xs[-1]-xs[-2])**2 + (ys[-1]-ys[-2])**2))
-    a2, b2 = getExtrapolatedLine((xs[-2], ys[-2]), (xs[-1], ys[-1]), ratio) # use the last two points
-
     # these are needed so that later we can get rid of the extra line segments at the beginning and end of G_primal:
     xcoords1 = xcoords[0]
     xcoords2 = xcoords[-1]
     ycoords1 = ycoords[0]
     ycoords2 = ycoords[-1]
 
-    # lengthen the channel centerline as well:
+    # lengthen the channel centerline so that it intersects the channel belt polygon:
+    ratio = 2*ch_belt_half_width/(np.sqrt((xs[1]-xs[0])**2 + (ys[1]-ys[0])**2))
+    a1, b1 = getExtrapolatedLine((xs[1], ys[1]), (xs[0], ys[0]), ratio) # use the first two points
+    ratio = 2*ch_belt_half_width/(np.sqrt((xs[-1]-xs[-2])**2 + (ys[-1]-ys[-2])**2))
+    a2, b2 = getExtrapolatedLine((xs[-2], ys[-2]), (xs[-1], ys[-1]), ratio) # use the last two points
     xcoords = np.hstack((b1[0], xcoords, b2[0]))
     ycoords = np.hstack((b1[1], ycoords, b2[1]))
     main_path = LineString(np.vstack((xcoords, ycoords)).T)
@@ -858,6 +899,10 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
     print('start and end nodes in G_primal:')
     print(primal_start_ind, primal_end_ind)
 
+    if len(G_primal) < 2:
+        print('G_primal only has one node!')
+        return [], [], [], [], [], [], [], [], [], [], []
+    
     print('getting bank coordinates for the two main banks')
     utm_coords = []
     x1_poly, y1_poly, ch_map = get_bank_coords(poly1_utm, mndwi, dataset, timer=True)
@@ -958,7 +1003,22 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         xs = xs[::-1]; ys = ys[::-1]
 
     print('creating directed graph')
-    D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, primal_end_ind)
+    D_primal = create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, primal_end_ind, flip_outlier_edges=flip_outlier_edges)
+
+    print('getting bank coordinates for main channel')
+    start_node, inds = find_start_node(D_primal)
+    edge_path = traverse_multigraph(D_primal, start_node)
+    D_primal.graph['main_path'] = edge_path # store main path as a graph attribute
+    x, y, x_utm1, y_utm1, x_utm2, y_utm2 = get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset)
+    D_primal.graph['main_channel_cl_coords'] = np.vstack((x, y)).T
+    D_primal.graph['main_channel_bank1_coords'] = np.vstack((x_utm1, y_utm1)).T
+    D_primal.graph['main_channel_bank2_coords'] = np.vstack((x_utm2, y_utm2)).T
+
+    if plot_D_primal:
+        plot_directed_graph(D_primal, mndwi, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, edge_path=edge_path)
+
+    D_primal.name = fname # use filename as the graph name
+    G_rook.name = fname # use filename as the graph name
 
     return D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys
 
@@ -996,7 +1056,10 @@ def resample_and_smooth(x, y, delta_s, smoothing_factor):
     okay = np.where(np.abs(np.diff(x)) + np.abs(np.diff(y)) > 0)
     dx = np.diff(x[okay]); dy = np.diff(y[okay])      
     ds = np.sqrt(dx**2+dy**2)
-    tck, u = scipy.interpolate.splprep([x[okay], y[okay]], s=smoothing_factor) # parametric spline representation of curve
+    try:
+        tck, u = scipy.interpolate.splprep([x[okay], y[okay]], s=smoothing_factor) # parametric spline representation of curve
+    except:
+        return x, y
     unew = np.linspace(0,1,1+int(sum(ds)/delta_s)) # vector for resampling
     out = scipy.interpolate.splev(unew,tck) # resampling
     xs = out[0]
@@ -1098,7 +1161,7 @@ def get_bank_coords(poly, mndwi, dataset, timer=False):
         for i in trange(len(row)):
             if col[i]<mndwi_small.shape[1] and row[i]<mndwi_small.shape[0]:
                 w = mndwi_small_dist[row[i], col[i]] # distance to closest channel bank at current location
-                if w <= 500:
+                if w <= 500: # this probably shouldn't be hardcoded!
                     pad = int(w)+10
                     tile = np.ones((pad*2, pad*2))
                     tile[pad, pad] = 0
@@ -1266,18 +1329,27 @@ def save_shapefiles(dirname, fname, G_rook, dataset, fname_add_on=''):
         gdf.crs = 'epsg:'+str(dataset.crs.to_epsg())
         gdf.to_file(dirname + fname[:-4]+fname_add_on+'_cl_polygons.shp')
 
-def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, G_primal, smoothing=False):
+def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, G_primal, smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None):
     fig = plt.figure()
     plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='Blues', alpha=0.5)
     for i in range(2):
         if type(G_rook.nodes()[i]['bank_polygon']) == Polygon:
             x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
             y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+            if smoothing:
+                ind1 = find_closest_point(start_x, start_y, np.vstack((x, y)).T)
+                ind2 = find_closest_point(end_x, end_y, np.vstack((x, y)).T)
+                if ind1 < ind2:
+                    x = x[ind1:ind2]
+                    y = y[ind1:ind2]
+                else:
+                    x = x[ind2:ind1]
+                    y = y[ind2:ind1]                
         else:
             x = G_rook.nodes()[i]['bank_polygon'].xy[0]
             y = G_rook.nodes()[i]['bank_polygon'].xy[1]
         if smoothing:
-            x, y = smooth_line(x, y, spline_ds = 100, spline_smoothing = 10000, savgol_window = 31, 
+            x, y = smooth_line(x, y, spline_ds = 100, spline_smoothing = 10000, savgol_window = min(31, len(x)), 
                                      savgol_poly_order = 3)
         if i == 0:
             plt.plot(x, y, color='r', linewidth=3)
@@ -1287,17 +1359,66 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
         x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
         y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
         if smoothing:
-            x, y = smooth_line(x, y, spline_ds = 25, spline_smoothing = 1000, savgol_window = min(11, len(x)), 
-                                     savgol_poly_order = 3)
+            if len(x) > 3:
+                x, y = smooth_line(x, y, spline_ds = 25, spline_smoothing = 5000, savgol_window = min(11, len(x)), 
+                                        savgol_poly_order = 3)
         plt.plot(x, y, color='tab:blue')
     for s,e,d in tqdm(G_primal.edges):
         x = G_primal[s][e][d]['geometry'].xy[0]
         y = G_primal[s][e][d]['geometry'].xy[1]
         if smoothing:
-            x, y = smooth_line(x, y, spline_ds = 25, spline_smoothing = 1000, savgol_window = min(11, len(x)), 
-                                     savgol_poly_order = 3)
+            if len(x) > 3:
+                x, y = smooth_line(x, y, spline_ds = 25, spline_smoothing = 5000, savgol_window = min(11, len(x)), 
+                                        savgol_poly_order = 3)
         plt.plot(x, y, 'k')
     return fig
+
+def extend_line(x, y, ratio):
+    a1, b1 = getExtrapolatedLine((x[1], y[1]), (x[0], y[0]), ratio) # use the first two points
+    a2, b2 = getExtrapolatedLine((x[-2], y[-2]), (x[-1], y[-1]), ratio) # use the last two points
+    x = np.hstack((b1[0], x, b2[0]))
+    y = np.hstack((b1[1], y, b2[1]))
+    line = LineString(np.vstack((x, y)).T)
+    return line
+
+def smooth_banklines(G_rook, dataset, mndwi, save_smooth_lines=False, spline_smoothing=1000):
+    """
+    Smooth banklines and return them as a list
+    """
+    polys = []
+    im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0,mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
+    for i in range(2):
+        # first need to isolate line that can be / should be smoothed:
+        other_side = im_boundary.buffer(-50).difference(G_rook.nodes()[i]['bank_polygon'])
+        line = other_side.intersection(G_rook.nodes()[i]['bank_polygon'])
+        line = linemerge(line.geoms)
+        if type(line) != LineString:
+            lengths = []
+            for geom in line.geoms:
+                lengths.append(geom.length)
+            line = line.geoms[np.argmax(lengths)]
+        print('smoothing main bankline')    
+        x1, y1 = smooth_line(line.xy[0], line.xy[1], spline_ds = 100, spline_smoothing = spline_smoothing, savgol_window = min(11, len(line.xy[0])), 
+                                savgol_poly_order = 3)
+        line = extend_line(x1, y1, 50)
+        geoms = split(im_boundary, line)
+        if geoms.geoms[0].intersection(G_rook.nodes[i]["bank_polygon"]).area > geoms.geoms[1].intersection(G_rook.nodes[i]["bank_polygon"]).area:
+            if save_smooth_lines:
+                G_rook.nodes()[i]['bank_polygon'] = geoms.geoms[0]
+            polys.append(geoms.geoms[0])
+        else:
+            if save_smooth_lines:
+                G_rook.nodes()[i]['bank_polygon'] = geoms.geoms[1]
+            polys.append(geoms.geoms[1])
+    for i in trange(2, len(G_rook.nodes)):
+        x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
+        y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+        x, y = smooth_line(x, y, spline_ds = 50, spline_smoothing = spline_smoothing, savgol_window = min(11, len(x)), 
+                                savgol_poly_order = 3)
+        if save_smooth_lines:
+            G_rook.nodes()[i]['bank_polygon'] = Polygon(np.vstack((x, y)).T)
+        polys.append(Polygon(np.vstack((x, y)).T))
+    return polys
 
 def read_and_plot_im(dirname, fname):
     with rasterio.open(dirname+fname) as dataset:
@@ -1314,56 +1435,55 @@ def read_and_plot_im(dirname, fname):
     plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray')
     return im, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
 
-def create_channel_nw_polygon(G_rook, dx=30):
-    """
-    create a channel network polygon - a single polygon with holes where there are islands / bars
-
-    """
-    two_main_banks = G_rook.nodes[0]['bank_polygon'].union(G_rook.nodes[1]['bank_polygon'])
-    difference = two_main_banks.convex_hull.difference(two_main_banks)
-    cline = G_rook.nodes[0]['cl_polygon'].intersection(G_rook.nodes[1]['cl_polygon'])
-    if len(G_rook) > 2:
-        count = 0
-        for geom in difference.geoms:
-            for i in range(2, len(G_rook)):
-                if geom.contains(G_rook.nodes[i]['bank_polygon']):
-                    break
-            if geom.contains(G_rook.nodes[i]['bank_polygon']):
-                break
-            count += 1
-        ch_belt = difference.geoms[count] # channel belt, with no islands
-        for i in range(len(difference.geoms)): # add small pieces that got detached
-            if i != count:
-                if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
-                    ch_belt = ch_belt.union(difference.geoms[i])
-        if type(ch_belt) == Polygon:
-            exterior = np.vstack((ch_belt.exterior.xy[0], ch_belt.exterior.xy[1])).T
-            interior = []
-            for i in range(2, len(G_rook)): # islands
-                x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
-                y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
-                interior.append(list(map(tuple, np.vstack((x,y)).T)))
-            ch_nw_poly = Polygon(exterior, holes=interior)
-        else:
-            polys = []
-            for geom in ch_belt.geoms:
-                exterior = np.vstack((geom.exterior.xy[0], geom.exterior.xy[1])).T
-                interior = []
-                for i in range(2, len(G_rook)): # islands
-                    if geom.overlaps(G_rook.nodes[i]['bank_polygon']) or geom.contains(G_rook.nodes[i]['bank_polygon']):
-                        x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
-                        y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
-                        interior.append(list(map(tuple, np.vstack((x,y)).T)))
-                polys.append(Polygon(exterior, holes=interior))
-            ch_nw_poly = MultiPolygon(polys)
-    else: # if there are no islands
-        inds = []
-        for i in range(len(difference.geoms)):
-            if difference.geoms[i].intersects(cline) and difference.geoms[i].area > dx**2:
-                inds.append(i)
-        ch_nw_poly = difference.geoms[inds[0]]
-        for i in inds[1:]:
-            ch_nw_poly = ch_nw_poly.union(difference.geoms[i])
+def create_channel_nw_polygon(G_rook, buffer=10, ch_mouth_poly=None, dataset=None, mndwi=None):
+    '''
+    this is a new version of the 'create_channel_nw_polygon' function - it is simpler and I think it works but still keeping the old one around for now
+    example usage for creating a channel mouth polygon:
+    points = plt.ginput(2) # create two points that define a line running roughly parallel to the coastline
+    x_utm, y_utm = rb.get_channel_mouth_polygon(mndwi, dataset, points) # use this function to create the channel mouth polygon
+    ''' 
+    both_banks = G_rook.nodes()[0]['bank_polygon'].buffer(buffer).union(G_rook.nodes()[1]['bank_polygon'].buffer(buffer))
+    if type(both_banks) == Polygon:
+        ch_belt_pieces = both_banks.interiors
+    else:
+        im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0,mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
+        ch_belt_pieces= im_boundary.buffer(-10).difference(G_rook.nodes()[0]['bank_polygon'].buffer(10).union(G_rook.nodes()[1]['bank_polygon'].buffer(10)))
+    if type(ch_belt_pieces)==InteriorRingSequence:
+        temp = []
+        for i in range(len(ch_belt_pieces)):
+            temp.append(Polygon(ch_belt_pieces[i]))
+        ch_belt_pieces = temp
+    if type(ch_belt_pieces) == Polygon: # if the channel belt is a single polygon
+        ch_nw_poly = ch_belt_pieces.buffer(buffer)
+    else: # otherwise put together the buffered pieces using 'union'
+        ch_nw_poly = ch_belt_pieces[0].buffer(buffer)
+        for ch_belt_piece in ch_belt_pieces[1:]:
+            ch_nw_poly = ch_nw_poly.union(ch_belt_piece.buffer(buffer))
+    if type(ch_nw_poly) == MultiPolygon:
+        areas = []
+        for geom in ch_nw_poly.geoms:
+            areas.append(geom.area)
+        ch_nw_poly = ch_nw_poly.geoms[np.argmax(areas)]
+    if len(G_rook) > 2: # if there are islands, add the bank polygons as holes
+        holes = [] # create list of holes
+        for node in range(2, len(G_rook)):
+            holes.append(G_rook.nodes()[node]['bank_polygon'].exterior)
+        ch_nw_poly = Polygon(ch_nw_poly.exterior, holes)
+    if ch_mouth_poly:
+        outer_polygon = Polygon(ch_nw_poly.exterior).difference(ch_mouth_poly.buffer(10)).buffer(0)
+        smaller_polygons = []
+        for geom in ch_nw_poly.interiors:
+            if outer_polygon.contains(geom):
+                smaller_polygons.append(Polygon(geom).buffer(0))
+            if outer_polygon.overlaps(Polygon(geom)):
+                part_to_be_removed = Polygon(geom).buffer(0).difference(outer_polygon)
+                smaller_polygons.append(Polygon(geom).buffer(0).difference(part_to_be_removed))
+        if type(outer_polygon) == MultiPolygon:
+            areas = []
+            for geom in outer_polygon.geoms:
+                areas.append(geom.area)
+            outer_polygon = outer_polygon.geoms[np.argmax(areas)]
+        ch_nw_poly = Polygon(outer_polygon.exterior, [p.exterior for p in smaller_polygons])
     return ch_nw_poly
 
 def convert_geographic_proj_to_utm(dirname, fname, dstCrs):
@@ -1662,24 +1782,24 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
         print('these sinks are: ' + str(sinks))
     cycles = list(nx.simple_cycles(D_primal))
     if len(cycles) > 0:
-        print('there are ' + str(len(cycles)) + 'cycles in D_primal!')
+        print('there are ' + str(len(cycles)) + ' cycles in D_primal!')
         print('these cycles are: ' + str(cycles))
-    # if len(sinks) > 0:
-    #     for sink in sinks:
-    #         if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
-    #             edges = [(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]
-    #             D_temp = D_primal.copy()
-    #             for edge in edges:
-    #                 # Remove the existing edge
-    #                 D_temp.remove_edge(edge[0], edge[1], edge[2])
-    #                 # Add the edge in the opposite direction
-    #                 D_temp.add_edge(edge[1], edge[0], edge[2])
-    #                 if len(list(nx.simple_cycles(D_temp))) == 0:
-    #                     print('flipping a flow direction in D_primal')
-    #                     D_primal.add_edge(edge[1], edge[0], edge[2])
-    #                     for key in D_primal[edge[0]][edge[1]][edge[2]].keys():
-    #                         D_primal[edge[1]][edge[0]][edge[2]][key] = D_primal[edge[0]][edge[1]][edge[2]][key]
-    #                     D_primal.remove_edge(edge[0], edge[1], edge[2])
+    if len(sinks) > 0:
+        for sink in sinks:
+            if len([(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]) > 1:
+                edges = [(u, v, k) for u, v, k in D_primal.edges(keys=True) if u == sink or v == sink]
+                D_temp = D_primal.copy()
+                for edge in edges:
+                    # Remove the existing edge
+                    D_temp.remove_edge(edge[0], edge[1], edge[2])
+                    # Add the edge in the opposite direction
+                    D_temp.add_edge(edge[1], edge[0], edge[2])
+                    if len(list(nx.simple_cycles(D_temp))) == 0:
+                        print('flipping a flow direction in D_primal')
+                        D_primal.add_edge(edge[1], edge[0], edge[2])
+                        for key in D_primal[edge[0]][edge[1]][edge[2]].keys():
+                            D_primal[edge[1]][edge[0]][edge[2]][key] = D_primal[edge[0]][edge[1]][edge[2]][key]
+                        D_primal.remove_edge(edge[0], edge[1], edge[2])
     return D_primal
 
 def set_width_weights(G_primal):
@@ -1803,7 +1923,7 @@ def analyze_width_and_wavelength(D_primal, main_path, ax, delta_s=5, smoothing_f
     yticks = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000, 20000]
     plt.yticks(yticks, labels=np.array(yticks).astype('str'))
     plt.colorbar(scatter, label='along-channel distance (km)');
-    return df
+    return df, curv, s, loc_zero_curv
 
 def compute_curvature(x,y):
     """function for computing first derivatives and curvature of a curve (centerline)
@@ -1883,8 +2003,10 @@ def traverse_multigraph(G, start_node, subpath_depth=5):
         next_path = find_subpath(G, current_node, subpath_depth)
         if next_path:
             # sometimes there is a cycle and we need to break it:
-            nodes_in_current_path = list(set(element for tuple_ in current_path for element in tuple_))
-            nodes_in_next_path = list(set(element for tuple_ in next_path for element in tuple_))
+            # nodes_in_current_path = list(set(element for tuple_ in current_path for element in tuple_))
+            nodes_in_current_path = set([element for tuple_ in [tuple_[:2] for tuple_ in current_path] for element in tuple_])
+            # nodes_in_next_path = list(set(element for tuple_ in next_path for element in tuple_))
+            nodes_in_next_path = set([element for tuple_ in [tuple_[:2] for tuple_ in next_path] for element in tuple_])
             if nodes_in_current_path == nodes_in_next_path:
                 break
             edge_path.extend(next_path)
@@ -1909,7 +2031,7 @@ def find_start_node(D_primal):
         print("could not find start node!")
     return start_node, inds
 
-def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
+def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset, cline_buffer=2000):
     x, y = [], []
     for s,e,d in edge_path:
         x_new = list(D_primal[s][e][d]['geometry'].xy[0][1:])
@@ -1944,7 +2066,7 @@ def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
     if type(non_overlap_1) == MultiLineString:
         x_utm1, y_utm1 = [], []
         for geom in non_overlap_1.geoms:
-            # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
+            # only add linestrings that are not aligned with the x or y axis (average offset relative to the axes is larger than 0.1 m):
             # if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
             x_utm1.extend(geom.xy[0])
             y_utm1.extend(geom.xy[1])
@@ -1953,16 +2075,26 @@ def get_bank_coords_for_main_channel(D_primal, mndwi, edge_path, dataset):
     if type(non_overlap_2) == MultiLineString:
         x_utm2, y_utm2 = [], []
         for geom in non_overlap_2.geoms:
-            # only add linestrings that are not aligned with thex or y axis (average offset relative to the axes is larger than 0.1 m):
+            # only add linestrings that are not aligned with the x or y axis (average offset relative to the axes is larger than 0.1 m):
             # if (np.sum(np.abs(np.diff(geom.xy[0])))/len(geom.xy[0]) > 1) and (np.sum(np.abs(np.diff(geom.xy[1])))/len(geom.xy[1]) > 0.1):
             x_utm2.extend(geom.xy[0])
             y_utm2.extend(geom.xy[1])
     else:
         x_utm2, y_utm2 = non_overlap_2.xy[0], non_overlap_2.xy[1]
-    buffered_centerline = LineString(np.vstack((x,y)).T).buffer(1000)
+    buffered_centerline = LineString(np.vstack((x,y)).T).buffer(cline_buffer)
     bankline1 = buffered_centerline.intersection(LineString(np.vstack((x_utm1, y_utm1)).T))
+    if type(bankline1) != LineString:
+        lengths = []
+        for line in bankline1.geoms:
+            lengths.append(line.length)
+        bankline1 = bankline1.geoms[np.argmax(lengths)]
     x_utm1 = bankline1.xy[0]; y_utm1 = bankline1.xy[1]
     bankline2 = buffered_centerline.intersection(LineString(np.vstack((x_utm2, y_utm2)).T))
+    if type(bankline2) != LineString:
+        lengths = []
+        for line in bankline2.geoms:
+            lengths.append(line.length)
+        bankline2 = bankline2.geoms[np.argmax(lengths)]
     x_utm2 = bankline2.xy[0]; y_utm2 = bankline2.xy[1]
     return x, y, x_utm1, y_utm1, x_utm2, y_utm2
 
@@ -2263,8 +2395,8 @@ def crop_geotiff(input_file, output_file, row_off, col_off, max_rows=2**16//2, m
         with rasterio.open(output_file, 'w', **crop_meta) as dst:
             dst.write(cropped_data)
 
-def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername):
-    ch_nw_poly = create_channel_nw_polygon(G_rook)
+def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername, ch_mouth_poly=None):
+    ch_nw_poly = create_channel_nw_polygon(G_rook, ch_mouth_poly=ch_mouth_poly)
     gs = geopandas.GeoSeries(ch_nw_poly)
     gs.crs = dataset.crs.data['init']
     gs.to_file(dirname + rivername + '_channels.shp')
@@ -2277,6 +2409,8 @@ def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername):
     with open(dirname + rivername + "_G_rook.pickle", "wb") as f:
         pickle.dump(G_rook, f)
     with open(dirname + rivername +"_D_primal.pickle", "wb") as f:
+        pickle.dump(D_primal, f)
+    with open(dirname + rivername +"_G_primal.pickle", "wb") as f:
         pickle.dump(D_primal, f)
 
 def merge_and_plot_channel_polygons(fnames):
@@ -2295,6 +2429,215 @@ def merge_and_plot_channel_polygons(fnames):
             plt.fill(interior.xy[0], interior.xy[1], 'w')
     plt.axis('equal')
     return big_poly
+
+def get_channel_mouth_polygon(G_rook, mndwi, dataset, points):
+    # poly = LineString(points).buffer(1)
+    a1, b1 = getExtrapolatedLine((points[1][0], points[1][1]), (points[0][0], points[0][1]), 2000) # use the first two points
+    a2, b2 = getExtrapolatedLine((points[-2][0], points[-2][1]), (points[-1][0], points[-1][1]), 2000) # use the last two points
+    line = LineString(np.vstack(((b1[0], b1[1]), points, (b2[0], b2[1]))))
+    poly = line.buffer(1)
+    tile_size = 5000 # this should depend on the mean channel width (in pixels)
+    row1, col1 = dataset.index(poly.bounds[0], poly.bounds[1])
+    row2, col2 = dataset.index(poly.bounds[2], poly.bounds[3])
+    row1 = max(row1+tile_size, 0)
+    row1 = min(row1, mndwi.shape[0])
+    row2 = max(row2-tile_size, 0)
+    row2 = min(row2, mndwi.shape[0])
+    col1 = max(col1-tile_size, 0)
+    col1 = min(col1, mndwi.shape[1])
+    col2 = max(col2+tile_size, 0)
+    col2 = min(col2, mndwi.shape[1])
+    rst_arr = np.zeros(np.shape(mndwi))
+    shapes = ((geom, value) for geom, value in zip([poly], [1]))
+    rasterized_poly = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform) [row2:row1, col1:col2]
+    mndwi_small = mndwi[row2:row1, col1:col2].copy()
+    
+    # a1, b1 = getExtrapolatedLine((points[1][0], points[1][1]), (points[0][0], points[0][1]), 2000) # use the first two points
+    # a2, b2 = getExtrapolatedLine((points[-2][0], points[-2][1]), (points[-1][0], points[-1][1]), 2000) # use the last two points
+    # line = LineString(np.vstack(((b1[0], b1[1]), points, (b2[0], b2[1]))))
+    im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0,mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
+    geoms = split(im_boundary, line)
+    areas = []
+    for geom in geoms.geoms:
+        areas.append(geom.area)
+    corner_poly = geoms.geoms[np.argmin(areas)]
+    rst_arr = np.zeros(np.shape(mndwi))
+    shapes = ((geom, value) for geom, value in zip([corner_poly], [1]))
+    rasterized_corner = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)[row2:row1, col1:col2]
+    mndwi_small[rasterized_corner == 1] = 1
+    
+    mndwi_small_dist = ndimage.distance_transform_edt(mndwi_small)
+    
+    ch_map = np.zeros(np.shape(mndwi_small))
+    ch_map[rasterized_corner == 1] = 1
+    row = np.where(rasterized_poly)[0]
+    col = np.where(rasterized_poly)[1]
+    for i in trange(len(row)):
+        if col[i]<mndwi_small.shape[1] and row[i]<mndwi_small.shape[0]:
+            w = mndwi_small_dist[row[i], col[i]] # distance to closest channel bank at current location
+            if w <= 5000:
+                pad = int(w)+10
+                tile = np.ones((pad*2, pad*2))
+                tile[pad, pad] = 0
+                tile = ndimage.distance_transform_edt(tile)
+                tile[tile >= w] = 0 # needed to avoid issues with narrow channels
+                tile[tile > 0] = 1
+                r1 = max(0, row[i]-pad)
+                r2 = min(row[i]+pad, mndwi_small.shape[0])
+                c1 = max(0, col[i]-pad)
+                c2 = min(col[i]+pad, mndwi_small.shape[1])
+                tr1 = max(0, pad-row[i])
+                tr2 = min(2*pad, pad+mndwi_small.shape[0]-row[i])        
+                tc1 = max(0, pad-col[i])
+                tc2 = min(2*pad, pad+mndwi_small.shape[1]-col[i])
+                ch_map[r1:r2, c1:c2] = np.maximum(tile[tr1:tr2, tc1:tc2], ch_map[r1:r2, c1:c2])
+    # ch_map = ~(ch_map.astype('bool'))
+    contours = find_contours(ch_map, 0.5)
+    contour_lengths = []
+    for i in range(len(contours)):
+        contour_lengths.append(len(contours[i]))
+    if len(contour_lengths) > 0:
+        ind = np.argmax(np.array(contour_lengths))
+        x = contours[ind][:,1]
+        y = contours[ind][:,0]
+        x_utm = dataset.xy(row2+np.array(y), col1+np.array(x))[0]
+        y_utm = dataset.xy(row2+np.array(y), col1+np.array(y))[1]
+        # extend line so that it intersects the image boundary:
+        a1, b1 = getExtrapolatedLine((x_utm[1], y_utm[1]), (x_utm[0], y_utm[0]), 20) # use the first two points
+        a2, b2 = getExtrapolatedLine((x_utm[-2], y_utm[-2]), (x_utm[-1], y_utm[-1]), 20) # use the last two points
+        xcoords = np.hstack((b1[0], x_utm, b2[0]))
+        ycoords = np.hstack((b1[1], y_utm, b2[1]))
+        line = LineString(np.vstack((xcoords, ycoords)).T)
+        polys = split(im_boundary, line)
+        areas = []
+        for geom in polys.geoms:
+            areas.append(geom.area)
+        ch_mouth_poly = polys.geoms[np.argmin(areas)]
+        x_utm = ch_mouth_poly.exterior.xy[0]
+        y_utm = ch_mouth_poly.exterior.xy[1]
+    else:
+        x_utm = []
+        y_utm = []
+    return(x_utm, y_utm, ch_map)
+
+def create_and_plot_bars(G_rooks, ts, ax1=None, ax2=None):
+    """
+    Create preserved scroll bar polygons and erosion polygons from a list of rook neighborhood graphs and plot them
+
+    Example usage:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20,15), sharex=True, sharey=True)
+        chs, bars, erosions = rb.create_and_plot_bars(G_rooks, len(G_rooks), ax1=ax1, ax2=ax2)
+    """
+    if ts < 2:
+        print('ts must be larger than 1!')
+        return None, None, None
+    if ts > len(G_rooks):
+        print('ts must be smaller than the length of G_rooks!')
+        return None, None, None
+    bars = [] # these are 'scroll' bars - shapely MultiPolygon objects that correspond to one time step
+    chs = [] # list of channels - shapely Polygon objects
+    all_chs = [] # list of merged channels (to be used for erosion)
+    erosions = []
+    erosion_all_chs = []
+    cmap = plt.get_cmap('Blues')
+    # create list of channels:
+    for i in trange(ts-1):
+        ch1 = create_channel_nw_polygon(G_rooks[i])
+        ch1 = ch1.buffer(0)
+        if type(ch1) == MultiPolygon:
+            areas = []
+            for geom in ch1.geoms:
+                areas.append(geom.area)
+            ch1 = ch1.geoms[np.argmax(areas)]
+        ch2 = create_channel_nw_polygon(G_rooks[i+1])
+        ch2 = ch2.buffer(0)
+        if type(ch2) == MultiPolygon:
+            areas = []
+            for geom in ch2.geoms:
+                areas.append(geom.area)
+            ch2 = ch2.geoms[np.argmax(areas)]
+        chs.append(ch1)
+    chs.append(ch2) # append last channel
+    # create list of merged channels:
+    all_ch = chs[ts-1]
+    all_chs.append(all_ch)
+    for i in trange(2, ts): 
+        all_ch = all_ch.union(chs[ts-i])
+        all_chs.append(all_ch)
+    erosion_all_ch = chs[0]
+    erosion_all_chs.append(erosion_all_ch)
+    for i in trange(1, ts-1): 
+        erosion_all_ch = erosion_all_ch.union(chs[i])
+        erosion_all_chs.append(erosion_all_ch)
+    # create scroll bars and plot them:
+    for i in trange(ts-1): # create scroll bars
+        bar = chs[i].difference(all_chs[ts-i-2]) # scroll bar defined by difference
+        bars.append(bar)
+        erosion = chs[i+1].difference(erosion_all_chs[i])
+        erosions.append(erosion)
+        if ax1: # plotting
+            color = cmap(i/float(ts))
+            if type(bar) == MultiPolygon or type(bar) == GeometryCollection:
+                for b in bar.geoms:
+                    if type(b) == Polygon:
+                        if len(b.interiors) == 0:
+                            ax1.fill(b.exterior.xy[0], b.exterior.xy[1], facecolor=color, edgecolor='k', linewidth=0.2)
+                        else:
+                            plot_polygon(ax1, b, facecolor=color, edgecolor='k', linewidth=0.2)
+            if type(bar) == Polygon:
+                if len(bar.interiors) == 0:
+                    ax1.fill(bar.exterior.xy[0], bar.exterior.xy[1], facecolor=color, edgecolor='k', linewidth=0.2)
+                else:
+                    plot_polygon(ax1, bar, facecolor=color, edgecolor='k', linewidth=0.2)
+    if ax1:
+        plot_polygon(ax1, ch2, facecolor='lightblue', edgecolor='k')
+        ax1.set_aspect('equal')
+        date = datetime.strptime(G_rooks[ts-1].name[12:20], "%Y%m%d")
+        ax1.set_title('Deposition, ' + date.strftime('%m')+'/'+date.strftime('%d')+'/'+date.strftime('%Y'))
+
+    # compute final erosional polygons:
+    erosions_final = []
+    cmap = plt.get_cmap('Reds')
+    for i in trange(ts-1):
+        color = cmap(i/float(ts))
+        if i==0:
+            all_bars = chs[i]
+        else:
+            all_bars = all_bars.union(bars[i]) # all depositional area up until this point in time
+        erosion = erosions[i].difference(all_bars) # remove net depositional areas from final erosion
+        erosions_final.append(erosion)
+        if ax2: # plotting
+            if type(erosion) == MultiPolygon or type(erosion) == GeometryCollection:
+                for b in erosion.geoms:
+                    if type(b) == Polygon:
+                        if len(b.interiors) == 0:
+                            ax2.fill(b.exterior.xy[0], b.exterior.xy[1], facecolor=color, edgecolor='k', linewidth=0.2)
+                        else:
+                            plot_polygon(ax2, b, facecolor=color, edgecolor='k', linewidth=0.2)
+            if type(erosion) == Polygon:
+                if len(erosion.interiors) == 0:
+                    ax2.fill(erosion.exterior.xy[0], erosion.exterior.xy[1], facecolor=color, edgecolor='k', linewidth=0.2)
+                else:
+                    plot_polygon(ax2, erosion, facecolor=color, edgecolor='k', linewidth=0.2)
+    if ax2:
+        plot_polygon(ax2, chs[0], facecolor='lightblue', edgecolor='k')
+        ax2.set_aspect('equal')
+        date = datetime.strptime(G_rooks[ts-1].name[12:20], "%Y%m%d")
+        ax2.set_title('Erosion, ' + date.strftime('%m')+'/'+date.strftime('%d')+'/'+date.strftime('%Y'))
+        plt.tight_layout()
+    return chs, bars, erosions_final
+
+def plot_polygon(ax, poly, **kwargs):
+    path = Path.make_compound_path(
+           Path(np.asarray(poly.exterior.coords)[:, :2]),
+           *[Path(np.asarray(ring.coords)[:, :2]) for ring in poly.interiors])
+ 
+    patch = PathPatch(path, **kwargs)
+    collection = PatchCollection([patch], **kwargs)
+     
+    ax.add_collection(collection, autolim=True)
+    ax.autoscale_view()
+    return collection 
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     for k, v in kwargs.items():
