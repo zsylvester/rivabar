@@ -7,13 +7,14 @@ channels:
 dependencies:
   - python=3.10
   - numpy
-  - matplotlib=3.7.1
-  - pyqt=5.15.7
+  - matplotlib
+  - pyqt
   - pandas
   - jupyterlab
   - scipy
   - scikit-image
   - scikit-learn
+  - cartopy
   - geopandas
   - pyproj
   - tqdm
@@ -29,3 +30,5 @@ dependencies:
     - sknw
     - rasterio
     - opencv-python
+    - matplotlib-scalebar
+    - pystac-client
