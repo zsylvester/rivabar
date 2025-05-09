@@ -103,11 +103,74 @@ def insert_node(graph, start_ind, end_ind, left_utm_x, upper_utm_y, delta_x, del
     return graph, node
 
 def normalized_difference(b1, b2):
+    """
+    Calculate the normalized difference between two bands.
+
+    This function computes the normalized difference index, a common
+    calculation in remote sensing (e.g., NDVI, NDWI). It handles cases
+    where both input bands are zero by setting the corresponding output
+    pixels to NaN to avoid division by zero and undefined results.
+
+    Parameters
+    ----------
+    b1 : numpy.ndarray
+        The first input band (e.g., Near Infrared for NDVI).
+        Should be a 2D NumPy array of numerical type.
+    b2 : numpy.ndarray
+        The second input band (e.g., Red for NDVI).
+        Should be a 2D NumPy array of the same shape and numerical type as b1.
+
+    Returns
+    -------
+    numpy.ndarray
+        A 2D NumPy array containing the normalized difference values.
+        The values typically range from -1 to 1. Pixels where both
+        input bands were zero will be NaN.
+    """
     band1 = np.where((b1==0) & (b2==0), np.nan, b1)
     band2 = np.where((b1==0) & (b2==0), np.nan, b2)
     return (band1 - band2) / (band1 + band2)
 
 def find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_x, end_y, left_utm_x, upper_utm_y, delta_x, delta_y):
+    """
+    Find graph edges that are closest to specified start and end points.
+    
+    This function identifies the edges in a graph that are closest to given start and end points
+    in UTM coordinates. It converts pixel coordinates to UTM, builds a KD-tree for efficient
+    nearest neighbor search, and returns the node indices of the edges closest to the input points.
+    
+    Parameters
+    ----------
+    graph : networkx.Graph
+        The graph containing edges with 'pts' attributes. Comes from skeletonization.
+    start_x : float
+        The x-coordinate (UTM) of the start point.
+    start_y : float
+        The y-coordinate (UTM) of the start point.
+    end_x : float
+        The x-coordinate (UTM) of the end point.
+    end_y : float
+        The y-coordinate (UTM) of the end point.
+    left_utm_x : float
+        The UTM x-coordinate of the left edge of the raster.
+    upper_utm_y : float
+        The UTM y-coordinate of the upper edge of the raster.
+    delta_x : float
+        The pixel width in UTM coordinates.
+    delta_y : float
+        The pixel height in UTM coordinates.
+        
+    Returns
+    -------
+    start_ind1 : int
+        The source node index of the edge closest to the start point.
+    end_ind1 : int
+        The target node index of the edge closest to the start point.
+    start_ind2 : int
+        The source node index of the edge closest to the end point.
+    end_ind2 : int
+        The target node index of the edge closest to the end point.
+    """
     # find reasonable start and end points on graph edges
     edge_utm_xs = []
     edge_utm_ys = []
@@ -133,6 +196,33 @@ def find_graph_edges_close_to_start_and_end_points(graph, start_x, start_y, end_
     return start_ind1, end_ind1, start_ind2, end_ind2
 
 def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, upper_utm_y, delta_x, delta_y):
+    """
+    Remove extra lines at the beginning and end of a graph by finding the closest edge to a given point.
+    
+    Parameters
+    ----------
+    G_primal : networkx.Graph
+        The graph containing edges with 'geometry' attributes.
+    x1 : numpy.ndarray or float
+        The x-coordinate(s) in pixel coordinates to be converted to UTM.
+    y1 : numpy.ndarray or float
+        The y-coordinate(s) in pixel coordinates to be converted to UTM.
+    left_utm_x : float
+        The UTM x-coordinate of the left edge of the raster.
+    upper_utm_y : float
+        The UTM y-coordinate of the upper edge of the raster.
+    delta_x : float
+        The pixel width in UTM coordinates.
+    delta_y : float
+        The pixel height in UTM coordinates.
+        
+    Returns
+    -------
+    G_primal : networkx.Graph
+        The modified graph with extra lines removed.
+    node : int
+        The node index that is closest to the input point (x1, y1).
+    """
     x1, y1 = convert_to_utm(x1, y1, left_utm_x, upper_utm_y, delta_x, delta_y)
     # collect UTM coordinates for edges in G_primal:
     edge_utm_xs = []
@@ -199,6 +289,22 @@ def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, up
     return G_primal, node
 
 def convert_to_uint8(channel):
+    """
+    Convert a normalized float array to uint8 format.
+    
+    This function takes an array with values between 0 and 1 and
+    converts it to uint8 format by scaling values to the range 0-255.
+    
+    Parameters
+    ----------
+    channel : numpy.ndarray
+        Input array with normalized values (typically between 0 and 1).
+        
+    Returns
+    -------
+    numpy.ndarray
+        Array converted to uint8 data type with values scaled to 0-255 range.
+    """
     channel8 = channel * 255
     channel8 = channel8.astype('uint8')
     return channel8
@@ -281,6 +387,35 @@ def read_landsat_data(dirname, fname, mndwi_threshold=0.01):
     return equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y
 
 def read_water_index(dirname, fname, mndwi_threshold):
+    """
+    Read a water index raster file and apply thresholding.
+    
+    This function opens a water index raster file, applies a threshold to create
+    a binary water mask, and extracts the geospatial information.
+    
+    Parameters
+    ----------
+    dirname : str
+        Directory path where the water index file is located.
+    fname : str
+        Filename of the water index raster.
+    mndwi_threshold : float or str
+        Threshold value for the water index. Values above this threshold
+        will be set to 1 (water), others to 0 (non-water).
+        
+    Returns
+    -------
+    mndwi : numpy.ndarray
+        Binary water mask where 1 represents water and 0 represents non-water.
+    left_utm_x : float
+        The UTM x-coordinate of the left edge of the raster.
+    upper_utm_y : float
+        The UTM y-coordinate of the upper edge of the raster.
+    right_utm_x : float
+        The UTM x-coordinate of the right edge of the raster.
+    lower_utm_y : float
+        The UTM y-coordinate of the lower edge of the raster.
+    """
     with rasterio.open(dirname + fname) as dataset:
         mndwi = dataset.read(1)
         mndwi[mndwi > float(mndwi_threshold)] = 1
@@ -296,6 +431,57 @@ def read_water_index(dirname, fname, mndwi_threshold):
     return mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y
 
 def create_mndwi(dirname, fname, file_type, mndwi_threshold=0.01, delete_pixels_polys=False, small_hole_threshold=64, remove_smaller_components=True, solidity_filter=False):
+    """
+    Create a Modified Normalized Difference Water Index (MNDWI) binary mask from input data.
+    
+    This function processes either a water index raster or Landsat data to create a binary
+    water mask. It can filter out small holes, remove small components, and apply solidity
+    filtering to improve the water mask quality.
+    
+    Parameters
+    ----------
+    dirname : str
+        Directory path where the input file is located.
+    fname : str
+        Filename of the input raster.
+    file_type : str
+        Type of input file. Can be 'water_index' for a single water index raster
+        or another value for Landsat TIF files.
+    mndwi_threshold : float or str, optional
+        Threshold value for the water index. Values above this threshold
+        will be set to 1 (water), others to 0 (non-water). Default is 0.01.
+    delete_pixels_polys : bool or list, optional
+        List of polygons to mask out from the water index (e.g., bridges),
+        or False to skip this step. Default is False.
+    small_hole_threshold : int, optional
+        Minimum size (in pixels) of holes to keep in the water mask.
+        Smaller holes will be filled. Default is 64.
+    remove_smaller_components : bool, optional
+        Whether to remove small disconnected water bodies, keeping only
+        the largest component. Default is True.
+    solidity_filter : bool, optional
+        Whether to filter objects based on solidity (area/convex hull area).
+        Objects with solidity < 0.2 will be removed. Default is False.
+        
+    Returns
+    -------
+    mndwi : numpy.ndarray
+        Binary water mask where 1 represents water and 0 represents non-water.
+    left_utm_x : float
+        The UTM x-coordinate of the left edge of the raster.
+    upper_utm_y : float
+        The UTM y-coordinate of the upper edge of the raster.
+    right_utm_x : float
+        The UTM x-coordinate of the right edge of the raster.
+    lower_utm_y : float
+        The UTM y-coordinate of the lower edge of the raster.
+    delta_x : float
+        The pixel width in UTM coordinates.
+    delta_y : float
+        The pixel height in UTM coordinates.
+    dataset : rasterio.DatasetReader
+        The opened raster dataset with metadata.
+    """
     if file_type == 'water_index': # single water index raster
         with rasterio.open(dirname + fname) as dataset:
             mndwi = dataset.read(1)
@@ -2196,6 +2382,28 @@ def find_longer_segment_coords(polygon, i1, i2, xs, ys):
                 return segment2.xy[0][::-1], segment2.xy[1][::-1]
             
 def extract_coords(geometry):
+    """
+    Extract coordinates from a geometry object.
+    
+    This function extracts x and y coordinates from a geometry object,
+    handling both LineString and MultiLineString geometries. For MultiLineString
+    geometries, it adds NaN values between line segments to facilitate plotting.
+    
+    Parameters
+    ----------
+    geometry : shapely.geometry
+        The geometry object from which to extract coordinates.
+        Can be LineString, MultiLineString, or other geometry types.
+        
+    Returns
+    -------
+    x_all : list
+        List of x-coordinates extracted from the geometry.
+        For MultiLineString, includes NaN values between segments.
+    y_all : list
+        List of y-coordinates extracted from the geometry.
+        For MultiLineString, includes NaN values between segments.
+    """
     if geometry.is_empty:
         return [], []
     
@@ -3748,6 +3956,25 @@ def get_ch_and_bar_areas(gdf, xmin, xmax, ymin, ymax):
     return dates, all_bars, chs, ch_belts, bar_areas, ch_areas
 
 def get_all_channel_widths(D_primal):
+    """
+    Extract all channel widths from a directed multigraph.
+    
+    This function iterates through all edges in the directed multigraph and
+    extracts the channel widths by summing the half-widths from both sides
+    of the channel.
+    
+    Parameters
+    ----------
+    D_primal : networkx.MultiDiGraph
+        A directed multigraph where edges contain 'half_widths' attributes.
+        Each 'half_widths' attribute is a dictionary with two keys, each
+        corresponding to a list of half-width measurements.
+        
+    Returns
+    -------
+    widths : list
+        A flattened list of all channel widths across all edges in the graph.
+    """
     widths = []
     for s,e,d in D_primal.edges:
         key1 = list(D_primal[s][e][d]['half_widths'].keys())[0]
