@@ -1704,7 +1704,9 @@ def save_shapefiles(dirname, fname, G_rook, dataset, fname_add_on=''):
         gdf.crs = 'epsg:'+str(dataset.crs.to_epsg())
         gdf.to_file(dirname + fname[:-4]+fname_add_on+'_cl_polygons.shp')
 
-def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, G_primal, plot_main_banklines=True, plot_lines=True, smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None):
+def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, 
+                G_primal, plot_main_banklines=True, plot_lines=True, plot_image=True,
+                smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None):
     """
     Plots an image with overlaid lines representing bank polygons and edges from two graphs.
 
@@ -1741,7 +1743,8 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
         The resulting figure.
     """
     fig, ax = plt.subplots()
-    plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='Blues', alpha=0.5)
+    if plot_image:
+        plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray', alpha=1)
     for i in range(2):
         if type(G_rook.nodes()[i]['bank_polygon']) == Polygon:
             x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
@@ -1762,9 +1765,9 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
             x, y = smooth_line(x, y, spline_ds = 100, spline_smoothing = 10000, savgol_window = min(31, len(x)), 
                                      savgol_poly_order = 3)
         if i == 0 and plot_main_banklines:
-            plt.plot(x, y, color='tab:blue', linewidth=2)
+            plt.plot(x, y, color='tab:blue')
         if i == 1 and plot_main_banklines:
-            plt.plot(x, y, color='tab:blue', linewidth=2)
+            plt.plot(x, y, color='tab:blue')
     for i in trange(2, len(G_rook.nodes)):
         x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
         y = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
@@ -1915,7 +1918,7 @@ def read_and_plot_im(dirname, fname):
     plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray')
     return im, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y
 
-def create_channel_nw_polygon(G_rook, buffer=10, ch_mouth_poly=None, dataset=None, mndwi=None):
+def create_channel_nw_polygon(G_rook, buffer=10, ch_mouth_poly=None, dataset=None):
     """
     Creates a polygon representing the channel network.
 
@@ -1941,7 +1944,7 @@ def create_channel_nw_polygon(G_rook, buffer=10, ch_mouth_poly=None, dataset=Non
     if type(both_banks) == Polygon and len(both_banks.interiors) > 0:
         ch_belt_pieces = both_banks.interiors
     else:
-        im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0, mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
+        im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0, dataset.shape[1]), dataset.xy(dataset.shape[0], dataset.shape[1]), dataset.xy(dataset.shape[0], 0)])
         ch_belt_pieces= im_boundary.buffer(-10).difference(G_rook.nodes()[0]['bank_polygon'].buffer(10).union(G_rook.nodes()[1]['bank_polygon'].buffer(10)))
     # print(type(ch_belt_pieces))
     if type(ch_belt_pieces)==InteriorRingSequence:
@@ -3866,7 +3869,7 @@ def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername, c
     -------
     None
     """
-    ch_nw_poly = create_channel_nw_polygon(G_rook, ch_mouth_poly=ch_mouth_poly)
+    ch_nw_poly = create_channel_nw_polygon(G_rook, ch_mouth_poly=ch_mouth_poly, dataset=dataset)
     gs = geopandas.GeoSeries(ch_nw_poly)
     gs.crs = 'epsg:'+str(dataset.crs.to_epsg())
     gs.to_file(dirname + rivername + '_channels.shp')
@@ -4401,12 +4404,12 @@ def plot_graph_w_colors(D_primal, ax):
     for node in sources:
         x = D_primal.nodes()[node]['geometry'].xy[0][0]
         y = D_primal.nodes()[node]['geometry'].xy[1][0]
-        plt.plot(x, y, 'o', color='blue', markersize=5, zorder=10)  # Blue circles for sources
+        plt.plot(x, y, 'o', color='blue', markersize=5, zorder=10)
     # Plot sink nodes as black circles
     for node in sinks:
         x = D_primal.nodes()[node]['geometry'].xy[0][0]
         y = D_primal.nodes()[node]['geometry'].xy[1][0]
-        plt.plot(x, y, 'o', color='black', markersize=5, zorder=10)  # Black circles for sinks
+        plt.plot(x, y, 'o', color='black', markersize=5, zorder=10)
     plt.axis('equal')
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
