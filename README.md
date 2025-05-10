@@ -23,12 +23,15 @@ The images below illustrate how `rivabar` extracts both centerlines and bankline
 an island neighborhood graph in addition to the centerline graph.
 
 **Brahmaputra River - water index**
+
 <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_1.png" width="500">
 
 **Brahmaputra River - rook graph and centerline polygons**
+
 <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_2.png" width="500">
 
 **Brahmaputra River - centerline graph and bar polygons**
+
 <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_3.png" width="500">
 
 
