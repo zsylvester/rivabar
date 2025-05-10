@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+.ipynb_checkpoints/
+*.pyc
+.env
+build/
+dist/
+*.egg-info/
+htmlcov/
+.coverage
+.pytest_cache/
+
+# IDE / Editor specific
+.vscode/
+
+# OS-specific
+.DS_Store
+
+# Log files
+*.log
