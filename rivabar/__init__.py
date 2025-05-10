@@ -4,4 +4,4 @@ rivabar - A Python package to automatically extract channel centerlines and bank
 
 from .rivabar import *
 
-__version__ = '0.1.0' 
+__version__ = '0.1.1' 

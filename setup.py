@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="rivabar",
-    version="0.1.0",
+    version="0.1.1",
     author="Zoltan Sylvester",
     author_email="zsylvester@gmail.com",  # Replace with your actual email
     description="A Python package to automatically extract channel centerlines and banklines from water index images of rivers",
