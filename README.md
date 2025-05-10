@@ -65,14 +65,6 @@ Here are some basic examples of how to use `rivabar`:
 ```python
 import rivabar as rb
 
-# Create a water mask from Landsat bands
-mndwi, dataset = rb.create_mndwi(
-    dirname="path/to/landsat/data",
-    fname="landsat_image_name",
-    file_type="multiple_tifs",
-    mndwi_threshold=0.01
-)
-
 # Extract channel centerlines and banklines
 # Define start and end points of the channel you want to extract
 start_x, start_y = 675796.2, 98338.8 # UTM coordinates of the channel start
