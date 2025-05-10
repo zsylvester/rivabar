@@ -19,13 +19,17 @@ between two land domains.
 `rivabar` can be used to map single-thread and multithread rivers, in an almost entirely automated fashion. It requires a water mask as input 
 and a start (source) and end (sink) points for the channel / channel belt / delta.
 
-Here's an example of `rivabar` in action on a Landsat image of (part of) the Lena Delta:
+The images below illustrate how `rivabar` extracts both centerlines and banklines from a Landsat image of the Brahmaputra River, and creates 
+an island neighborhood graph in addition to the centerline graph.
 
-**Lena Delta - Original Landsat image**
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_1.jpeg" width="800">
+**Brahmaputra River - water index**
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_1.png" width="800">
 
-**Lena Delta - With Rivabar-extracted centerlines and banklines**
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_2.jpeg" width="800">
+**Brahmaputra River - rook graph and centerline polygons**
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_2.png" width="800">
+
+**Brahmaputra River - centerline graph and bar polygons**
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_3.png" width="800">
 
 
 ## Installation
