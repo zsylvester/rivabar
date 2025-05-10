@@ -22,17 +22,23 @@ and a start (source) and end (sink) points for the channel / channel belt / delt
 The images below illustrate how `rivabar` extracts both centerlines and banklines from a Landsat image of the Brahmaputra River, and creates 
 an island neighborhood graph in addition to the centerline graph.
 
-**Brahmaputra River - water index**
+<p align="center">
+  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_1.png" width="500">
+  <br>
+  <em>Brahmaputra River - water index</em>
+</p>
 
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_1.png" width="500">
+<p align="center">
+  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_2.png" width="500">
+  <br>
+  <em>Rook graph and centerline polygons</em>
+</p>
 
-**Brahmaputra River - rook graph and centerline polygons**
-
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_2.png" width="500">
-
-**Brahmaputra River - centerline graph and bar polygons**
-
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_3.png" width="500">
+<p align="center">
+  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_3.png" width="500">
+  <br>
+  <em>Centerline graph and bar polygons</em>
+</p>
 
 
 ## Installation
