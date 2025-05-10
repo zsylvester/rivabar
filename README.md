@@ -45,3 +45,5 @@ an island neighborhood graph in addition to the centerline graph.
 ## Getting started
 
 ## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
