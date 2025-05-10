@@ -6,7 +6,9 @@
 
 `rivabar` is a Python package that aims to automatically extract channel centerlines and banklines from water index images of rivers. 
 The focus is on getting good representations of the banklines, as centerlines are not physical features and how they are exactly derived 
-is subjective.
+is subjective. This is achieved in part by viewing channels as boundaries between polygons that correspond to islands or bars, as this 
+allows us to take advantage of algorithms developed for spatial analysis. In this view, even a single-thread channel becomes the boundary 
+between two land domains.
 
 `rivabar` relies on the following Python packages, among others:
 * [networkx](https://networkx.org/) to work with graphs
