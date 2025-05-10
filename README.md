@@ -58,6 +58,85 @@ pip install -e .
 
 ## Getting started
 
+Here are some basic examples of how to use `rivabar`:
+
+### Basic Usage
+
+```python
+import rivabar as rb
+
+# Create a water mask from Landsat bands
+mndwi, dataset = rb.create_mndwi(
+    dirname="path/to/landsat/data",
+    fname="landsat_image_name",
+    file_type="multiple_tifs",
+    mndwi_threshold=0.01
+)
+
+# Extract channel centerlines and banklines
+# Define start and end points of the channel you want to extract
+start_x, start_y = 675796.2, 98338.8 # UTM coordinates of the channel start
+end_x, end_y = 628190.3, -91886.6 # UTM coordinates of the channel end
+fname="LC08_L2SP_232060_20140219_20200911_02_T1_SR", # assumes that the Landsat bands are located in a folder with this name
+dirname="../data/Branco/", # parent folder of the 'LC08...' folder
+
+
+# Extract the channel centerline and related graphs
+D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys = rb.extract_centerline(
+    fname=fname,
+    dirname=dirname,
+    start_x=start_x,
+    start_y=start_y,
+    end_x=end_x,
+    end_y=end_y,
+    file_type='multiple_tifs',
+    flip_outlier_edges=True,
+    mndwi_threshold=0.0,
+    ch_belt_smooth_factor=1e8,
+    ch_belt_half_width=2000,
+    remove_smaller_components=True,\
+    delete_pixels_polys=False,
+    small_hole_threshold=64,
+    solidity_filter=False,
+    plot_D_primal=True
+)
+
+# Save the extracted centerlines and banklines as shapefiles
+rb.save_shapefiles(
+    dirname="output_directory",
+    fname="output_prefix",
+    G_rook=G_rook,
+    dataset=dataset
+)
+```
+
+### Analyzing Channel Widths and Morphology
+
+```python
+# Get the main path through the channel network
+edge_path = rb.get_main_path(D_primal)
+
+# Analyze channel width - wavelength scaling
+df, curv, s, loc_zero_curv, xsmooth, ysmooth = rb.analyze_width_and_wavelength(
+    D_primal=D_primal,
+    main_path=edge_path,
+    ax,
+    delta_s=5,
+    smoothing_factor=0.5*1e7,
+    min_sinuosity=1.1,
+    dx=30
+)
+
+# Extract and plot channel widths along main path
+xl, yl, w1l, w2l, w, s = rb.get_channel_widths_along_path(D_primal, D_primal.graph['main_path'])
+plt.figure(figsize=(12, 4))
+plt.plot(s, np.array(w)*30.0)
+plt.xlabel('along-channel distance (m)')
+plt.ylabel('channel width (m)');
+```
+
+For more examples and detailed usage, check out the example notebooks in the [notebooks](https://github.com/zsylvester/rivabar/tree/main/notebooks) directory.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
