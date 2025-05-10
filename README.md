@@ -1,6 +1,6 @@
 # rivabar
 
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/rivabar_logo.png" width="400">
+<img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/rivabar_logo.png" width="400">
 
 ## Description
 
@@ -23,19 +23,19 @@ The images below illustrate how `rivabar` extracts both centerlines and bankline
 an island neighborhood graph in addition to the centerline graph.
 
 <p align="left">
-  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_1.png" width="400">
+  <img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/brahmaputra_1.png" width="400">
   <br>
   <em>Brahmaputra River - water index</em>
 </p>
 
 <p align="left">
-  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_2.png" width="400">
+  <img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/brahmaputra_2.png" width="400">
   <br>
   <em>Rook graph and centerline polygons</em>
 </p>
 
 <p align="left">
-  <img src="https://github.com/zsylvester/rivabar/blob/main/images/brahmaputra_3.png" width="400">
+  <img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/brahmaputra_3.png" width="400">
   <br>
   <em>Centerline graph and bar polygons</em>
 </p>
