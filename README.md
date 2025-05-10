@@ -1,6 +1,6 @@
 # rivabar
 
-<img src="https://github.com/zsylvester/rivabar/blob/main/rivabar_logo.png" width="400">
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/rivabar_logo.png" width="400">
 
 ## Description
 
@@ -41,6 +41,20 @@ an island neighborhood graph in addition to the centerline graph.
 </p>
 
 ## Installation
+
+You can install `rivabar` directly from PyPI:
+
+```bash
+pip install rivabar
+```
+
+Alternatively, you can install from source:
+
+```bash
+git clone https://github.com/zsylvester/rivabar.git
+cd rivabar
+pip install -e .
+```
 
 ## Getting started
 
