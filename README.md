@@ -13,10 +13,10 @@
 Here's an example of 'rivabar' in action on a Landsat image of (part of) the Lena Delta:
 
 **Lena Delta - Original Landsat image**
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_1.jpeg" width="600">
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_1.jpeg" width="800">
 
 **Lena Delta - With Rivabar-extracted centerlines and banklines**
-<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_2.jpeg" width="600">
+<img src="https://github.com/zsylvester/rivabar/blob/main/images/lena_delta_2.jpeg" width="800">
 
 
 ## Installation
