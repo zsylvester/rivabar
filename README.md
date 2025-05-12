@@ -1,6 +1,6 @@
 # rivabar
 
-<img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/rivabar_logo.png" width="400">
+<img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/rivabar_logo.png" width="300">
 
 ## Description
 
@@ -58,15 +58,67 @@ pip install -e .
 
 ## Getting started
 
-Here are some basic examples of how to use `rivabar`:
+### Interactively Selecting Start/End Points
 
-### Basic Usage
+Before extracting centerlines, you need to define the approximate start and end points of the river segment you are interested in. You can do this interactively after creating the water mask:
+
+```python
+import rivabar as rb
+import matplotlib.pyplot as plt
+
+# Define input parameters
+dirname = "../data/Branco/"  # Adjust path to your data
+fname = "LC08_L2SP_232060_20140219_20200911_02_T1_SR" # Adjust filename/folder
+file_type = "multiple_tifs" # or 'water_index' if the water mask already exists
+
+# 1. Create the MNDWI water mask image
+mndwi, dataset = rb.create_mndwi(
+    dirname=dirname,
+    fname=fname,
+    file_type=file_type,
+    mndwi_threshold=0.0, # Adjust threshold as needed
+    small_hole_threshold=16,
+    remove_smaller_components=True
+)
+
+# 2. Display the image
+fig, ax = plt.subplots(figsize=(10, 10))
+rb.plot_im_and_lines(mndwi, dataset.bounds.left, dataset.bounds.right, 
+                     dataset.bounds.bottom, dataset.bounds.top, ax=ax, plot_image=True, plot_lines=False)
+plt.title("Click START point, then END point")
+plt.show() # Make sure the plot window appears
+
+# 3. Get start and end points using ginput
+# Click on the plot: first for the start point, then for the end point.
+points = plt.ginput(n=2, timeout=-1) # timeout=-1 waits indefinitely
+
+# Close the plot window automatically if desired
+# plt.close(fig)
+
+# Extract coordinates
+start_x, start_y = points[0]
+end_x, end_y = points[1]
+
+# 4. Now you can use these coordinates in extract_centerline
+# D_primal, G_rook, G_primal, ... = rb.extract_centerline(
+#     fname=fname,
+#     dirname=dirname,
+#     start_x=start_x,
+#     start_y=start_y,
+#     end_x=end_x,
+#     end_y=end_y,
+#     file_type=file_type,
+#     ...
+# )
+```
+
+### Centerline Extraction
 
 ```python
 import rivabar as rb
 
 # Extract channel centerlines and banklines
-# Define start and end points of the channel you want to extract
+# Define start and end points of the channel you want to extract (see previous section)
 start_x, start_y = 675796.2, 98338.8 # UTM coordinates of the channel start
 end_x, end_y = 628190.3, -91886.6 # UTM coordinates of the channel end
 fname="LC08_L2SP_232060_20140219_20200911_02_T1_SR", # assumes that the Landsat bands are located in a folder with this name
