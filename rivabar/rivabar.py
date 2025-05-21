@@ -346,13 +346,13 @@ def read_landsat_data(dirname, fname, mndwi_threshold=0.01):
         tuple: A tuple containing the processed image, MNDWI mask, and transformation parameters.
     """
     # this probably should be modified as not all recent landsat file names start with LC08
-    if fname[:4] == 'LC08': # landsat 8
+    if fname[:4] == 'LC08' or fname[:4] == 'LC09': # landsat 8 and 9
         band_numbers = [3, 6, 2, 4]
     else: # landsat 4 and 5
         band_numbers = [3, 5, 2, 1]
     bands, dataset = process_band(dirname, fname, band_numbers)
 
-    if fname[:4] == 'LC08': # landsat 8
+    if fname[:4] == 'LC08' or fname[:4] == 'LC09': # landsat 8 and 9
         rgb = np.stack([bands[4], bands[3], bands[2]], axis=-1)
         rgb_norm = adjust_band(rgb)
     else: # landsat 4 and 5
@@ -377,7 +377,7 @@ def read_landsat_data(dirname, fname, mndwi_threshold=0.01):
     equ = cv2.merge((clahe.apply(R8), clahe.apply(G8), clahe.apply(B8)))
 
     # compute mndwi:
-    if fname[:4] == 'LC08': # landsat 8
+    if fname[:4] == 'LC08' or fname[:4] == 'LC09': # landsat 8 and 9
         mndwi = normalized_difference(bands[3], bands[6])
     else: # landsat 4 and 5
         mndwi = normalized_difference(bands[2], bands[5])
@@ -509,8 +509,8 @@ def create_mndwi(dirname, fname, file_type, mndwi_threshold=0.01, delete_pixels_
         return None
     print('removing small holes')
     mndwi = remove_small_holes(mndwi.astype('bool'), small_hole_threshold) # remove small bars / islands
-    print('removing small components') # remove small components (= lakes) from water index image
     if remove_smaller_components:
+        print('removing small components') # remove small components (= lakes) from water index image
         mndwi_labels = label(mndwi)
         rp = regionprops_table(mndwi_labels, properties=['label', 'area', 'solidity'])
         df = pd.DataFrame(rp)
@@ -604,6 +604,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
                         mndwi_threshold=mndwi_threshold, delete_pixels_polys=delete_pixels_polys, small_hole_threshold=small_hole_threshold,\
                         remove_smaller_components=remove_smaller_components, solidity_filter=solidity_filter)
     if mndwi is None:
+        print('could not create MNDWI!')
         return [], [], [], [], [], [], [], [], [], [], []
 
     print('running skeletonization')
@@ -1227,7 +1228,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
         # fig, ax = plt.subplots()
         fig, ax = plot_im_and_lines(mndwi, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y,
             G_rook, G_primal, smoothing=False, start_x=start_x, start_y=start_y, end_x=end_x,
-        end_y=end_y, plot_lines=False)
+            end_y=end_y, plot_lines=False)
         plot_graph_w_colors(D_primal, ax)
 
     D_primal.name = fname # use filename as the graph name
@@ -1892,7 +1893,8 @@ def save_shapefiles(dirname, fname, G_rook, dataset, fname_add_on=''):
 
 def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, 
                 G_primal, plot_main_banklines=True, plot_lines=True, plot_image=True,
-                smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None):
+                smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None,
+                cmap='Blues', alpha=0.5):
     """
     Plots an image with overlaid lines representing bank polygons and edges from two graphs.
 
@@ -1922,6 +1924,10 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
         The x-coordinate of the ending point for smoothing (default is None).
     end_y : float, optional
         The y-coordinate of the ending point for smoothing (default is None).
+    cmap : str, optional
+        The colormap to use for the image (default is 'Blue_r').
+    alpha : float, optional
+        The transparency of the image (default is 0.5).
 
     Returns
     -------
@@ -1930,7 +1936,7 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
     """
     fig, ax = plt.subplots()
     if plot_image:
-        plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray', alpha=1)
+        plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap=cmap, alpha=alpha)
     for i in range(2):
         if type(G_rook.nodes()[i]['bank_polygon']) == Polygon:
             x = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
@@ -2442,9 +2448,13 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
     primal_end_ind : int
         The index of the ending node in the primal graph.
     flip_outlier_edges : bool, optional
-        Whether to flip the direction of outlier edges (default is False). Should be set to 'True' for complex networks (e.g., Lena Delta, Brahmaputra).
+        Whether to flip the direction of outlier edges (default is False). 
+        Should be set to 'True' for complex networks (e.g., Lena Delta, Brahmaputra).
     check_edges : bool, optional
-        Check edges around each island for consistency in the direction of the flow (default is False). Should be set to 'True' for multithread rivers (e.g., Brahmaputra), but not for meandering rivers or for networks with unrealistic centerline orientations (e.g., Lena Delta).
+        Check edges around each island for consistency in the direction of the flow 
+        (default is False). Should be set to 'True' for multithread rivers (e.g., Brahmaputra), 
+        but not for meandering rivers or for networks with unrealistic centerline 
+        orientations (e.g., Lena Delta).
 
     Returns
     -------
@@ -2703,9 +2713,6 @@ def truncate_graph_by_polygon(D_primal, x_utm, y_utm):
     D_primal_truncated : networkx.MultiDiGraph
         A new graph with nodes inside the polygon removed and edges truncated
     """
-    import numpy as np
-    import networkx as nx
-    from shapely.geometry import Point, LineString, Polygon
     
     # Create a copy of the graph to modify
     D_primal_truncated = D_primal.copy()
@@ -3179,7 +3186,7 @@ def find_zero_crossings(curve):
 
 def find_subpath(D_primal, root, depth_limit=10):
     """
-    Finds the subpath in a directed graph from the root node up to a specified depth limit.
+    Finds the subpath with the largest average width in a directed graph from the root node up to a specified depth limit.
 
     Parameters
     ----------
@@ -3254,11 +3261,11 @@ def traverse_multigraph(G, start_node, subpath_depth=5):
     while True:
         next_path = find_subpath(G, current_node, subpath_depth)
         if next_path:
-            # sometimes there is a cycle and we need to break it:
             # nodes_in_current_path = list(set(element for tuple_ in current_path for element in tuple_))
             nodes_in_current_path = set([element for tuple_ in [tuple_[:2] for tuple_ in current_path] for element in tuple_])
             # nodes_in_next_path = list(set(element for tuple_ in next_path for element in tuple_))
             nodes_in_next_path = set([element for tuple_ in [tuple_[:2] for tuple_ in next_path] for element in tuple_])
+            # sometimes there is a cycle and we need to break it:
             if nodes_in_current_path == nodes_in_next_path:
                 break
             edge_path.extend(next_path)
@@ -4637,7 +4644,7 @@ def plot_graph_w_colors(D_primal, ax):
         x = D_primal.nodes()[node]['geometry'].xy[0][0]
         y = D_primal.nodes()[node]['geometry'].xy[1][0]
         plt.plot(x, y, 'o', color='black', markersize=5, zorder=10)
-    plt.axis('equal')
+    # plt.axis('equal')
 
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     """
