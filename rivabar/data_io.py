@@ -758,4 +758,246 @@ class MinimalDataset:
         self.shape = shape
     
     def __repr__(self):
-        return f"MinimalDataset(crs={self.crs}, transform={self.transform}, shape={self.shape})" 
+        return f"MinimalDataset(crs={self.crs}, transform={self.transform}, shape={self.shape})"
+
+
+def create_water_mask_from_mapping(G_rook, dataset, output_path=None, 
+                                   include_islands=True, buffer_distance=0,
+                                   fill_value=1, nodata_value=0):
+    """
+    Create a water mask raster from rivabar mapping results.
+    
+    This function creates a water mask by:
+    1. Creating a bounding polygon from the image extent
+    2. Subtracting all land polygons (main banks and islands) from it
+    3. The remaining area is water
+    
+    Parameters
+    ----------
+    G_rook : networkx.Graph
+        Graph from rivabar mapping containing 'bank_polygon' attributes on nodes.
+        Nodes 0 and 1 are the main channel banks (land), nodes 2+ are islands/bars (land).
+    dataset : rasterio.DatasetReader or MinimalDataset
+        Dataset with georeferencing information (crs, transform, shape/bounds).
+    output_path : str, optional
+        Path to save the water mask as a GeoTIFF. If None, only returns the array.
+    include_islands : bool, optional
+        If True, subtract island/bar areas from water (they become land). Default is True.
+    buffer_distance : float, optional
+        Buffer distance to apply to land polygons (positive = expand land, negative = shrink).
+        Default is 0.
+    fill_value : int, optional
+        Value for water pixels (default is 1).
+    nodata_value : int, optional
+        Value for land/nodata pixels (default is 0).
+    
+    Returns
+    -------
+    water_mask : numpy.ndarray
+        2D binary array where fill_value indicates water and nodata_value indicates land.
+    
+    Examples
+    --------
+    >>> # After running rivabar mapping
+    >>> D_primal, G_rook, G_primal, mndwi, dataset, ... = rb.extract_centerline(...)
+    >>> 
+    >>> # Create water mask
+    >>> water_mask = rb.create_water_mask_from_mapping(G_rook, dataset)
+    >>> 
+    >>> # Save to file
+    >>> water_mask = rb.create_water_mask_from_mapping(G_rook, dataset, 
+    ...                                                output_path='water_mask.tif')
+    """
+    from rasterio.features import rasterize
+    from shapely.geometry import Polygon, MultiPolygon, box
+    from shapely.ops import unary_union
+    import numpy as np
+    
+    # Get raster dimensions and transform from dataset
+    if hasattr(dataset, 'shape'):
+        if isinstance(dataset.shape, tuple) and len(dataset.shape) >= 2:
+            height, width = dataset.shape[-2], dataset.shape[-1]
+        else:
+            height, width = dataset.shape, dataset.shape
+    elif hasattr(dataset, 'height') and hasattr(dataset, 'width'):
+        height, width = dataset.height, dataset.width
+    else:
+        raise ValueError("Cannot determine raster dimensions from dataset")
+    
+    transform = dataset.transform
+    crs = dataset.crs
+    
+    # Calculate bounds from transform
+    left = transform.c
+    top = transform.f
+    right = left + width * transform.a
+    bottom = top + height * transform.e  # Note: transform.e is typically negative
+    
+    # Ensure proper min/max
+    min_x, max_x = min(left, right), max(left, right)
+    min_y, max_y = min(top, bottom), max(top, bottom)
+    
+    # Create bounding box polygon for the entire image extent
+    bbox = box(min_x, min_y, max_x, max_y)
+    
+    # Collect ALL land polygons (main banks AND islands)
+    land_polygons = []
+    
+    for node_id in G_rook.nodes():
+        node_data = G_rook.nodes()[node_id]
+        if 'bank_polygon' not in node_data:
+            continue
+            
+        polygon = node_data['bank_polygon']
+        
+        if polygon is None:
+            continue
+        
+        # Skip islands if not including them
+        if node_id >= 2 and not include_islands:
+            continue
+            
+        # Ensure it's a valid Polygon
+        if isinstance(polygon, Polygon):
+            if polygon.is_valid:
+                land_polygons.append(polygon)
+            else:
+                # Try to fix invalid polygon
+                fixed = polygon.buffer(0)
+                if fixed.is_valid and not fixed.is_empty:
+                    land_polygons.append(fixed)
+        elif isinstance(polygon, MultiPolygon):
+            for geom in polygon.geoms:
+                if isinstance(geom, Polygon):
+                    if geom.is_valid:
+                        land_polygons.append(geom)
+                    else:
+                        fixed = geom.buffer(0)
+                        if fixed.is_valid and not fixed.is_empty:
+                            land_polygons.append(fixed)
+        elif hasattr(polygon, 'geoms'):
+            # Handle other geometry collections
+            for geom in polygon.geoms:
+                if isinstance(geom, Polygon) and geom.is_valid:
+                    land_polygons.append(geom)
+    
+    if not land_polygons:
+        print("Warning: No valid land polygons found in G_rook")
+        # Return all water if no land polygons found
+        return np.full((height, width), fill_value, dtype=np.uint8)
+    
+    # Create the water area by subtracting land from bounding box
+    try:
+        # Union all land polygons
+        all_land = unary_union(land_polygons)
+        
+        # Apply buffer if specified
+        if buffer_distance != 0:
+            all_land = all_land.buffer(buffer_distance)
+        
+        # Water area = bounding box - land areas
+        water_area = bbox.difference(all_land)
+            
+    except Exception as e:
+        print(f"Warning: Error processing polygons: {e}")
+        print("Attempting to fix geometries...")
+        try:
+            # Try to fix geometries
+            fixed_polygons = [p.buffer(0) for p in land_polygons if p.buffer(0).is_valid]
+            all_land = unary_union(fixed_polygons)
+            water_area = bbox.difference(all_land)
+        except Exception as e2:
+            print(f"Error: Could not create water mask: {e2}")
+            return np.full((height, width), nodata_value, dtype=np.uint8)
+    
+    # Rasterize the water area
+    if water_area.is_empty:
+        print("Warning: Water area is empty after polygon operations")
+        water_mask = np.full((height, width), nodata_value, dtype=np.uint8)
+    else:
+        # Convert to list of geometries for rasterize
+        if isinstance(water_area, Polygon):
+            geometries = [(water_area, fill_value)]
+        elif isinstance(water_area, MultiPolygon):
+            geometries = [(geom, fill_value) for geom in water_area.geoms if geom.is_valid]
+        elif hasattr(water_area, 'geoms'):
+            geometries = [(geom, fill_value) for geom in water_area.geoms 
+                         if isinstance(geom, Polygon) and geom.is_valid]
+        else:
+            print(f"Warning: Unexpected geometry type: {type(water_area)}")
+            geometries = [(water_area, fill_value)]
+        
+        water_mask = rasterize(
+            geometries,
+            out_shape=(height, width),
+            transform=transform,
+            fill=nodata_value,
+            dtype=np.uint8
+        )
+    
+    # Save to file if output path is provided
+    if output_path is not None:
+        import rasterio
+        from rasterio.crs import CRS
+        
+        # Ensure CRS is proper type
+        if isinstance(crs, str):
+            crs = CRS.from_string(crs)
+        
+        with rasterio.open(
+            output_path,
+            'w',
+            driver='GTiff',
+            height=height,
+            width=width,
+            count=1,
+            dtype=water_mask.dtype,
+            crs=crs,
+            transform=transform,
+            nodata=nodata_value
+        ) as dst:
+            dst.write(water_mask, 1)
+        print(f"Water mask saved to: {output_path}")
+    
+    return water_mask
+
+
+def create_water_mask_from_river(river, output_path=None, **kwargs):
+    """
+    Create a water mask from a River object.
+    
+    This is a convenience wrapper around create_water_mask_from_mapping
+    that extracts the necessary data from a River object.
+    
+    Parameters
+    ----------
+    river : River
+        A processed River object with G_rook and dataset attributes.
+    output_path : str, optional
+        Path to save the water mask as a GeoTIFF.
+    **kwargs : dict
+        Additional keyword arguments passed to create_water_mask_from_mapping.
+    
+    Returns
+    -------
+    water_mask : numpy.ndarray
+        2D binary array where 1 indicates water and 0 indicates land.
+    
+    Examples
+    --------
+    >>> river = rb.River(fname=..., dirname=..., ...)
+    >>> river.map_river_banks(...)
+    >>> water_mask = rb.create_water_mask_from_river(river, output_path='mask.tif')
+    """
+    if not hasattr(river, '_G_rook') or river._G_rook is None:
+        raise ValueError("River object has not been processed. Call map_river_banks() first.")
+    
+    if not hasattr(river, '_dataset') or river._dataset is None:
+        raise ValueError("River object does not have dataset information.")
+    
+    return create_water_mask_from_mapping(
+        river._G_rook, 
+        river._dataset, 
+        output_path=output_path,
+        **kwargs
+    ) 

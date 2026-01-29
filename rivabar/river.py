@@ -170,12 +170,6 @@ class River:
         self._check_processed()
         return self._D_primal
     
-    @property  
-    def polygon_graph(self):
-        """Get the rook adjacency graph of channel polygons (G_rook)."""
-        self._check_processed()
-        return self._G_rook
-    
     @property
     def centerline_graph(self):
         """Get the primal centerline graph (G_primal).""" 
@@ -272,7 +266,8 @@ class River:
             
         xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(self._D_primal, path)
 
-        return s, np.array(w)*self._dataset.res[0] # convert to meters
+        return s, np.array(w)*self._dataset.transform[0] # convert to meters
+
     
     def analyze_wavelength_and_width(self, path=None, ax=None, **kwargs):
         """

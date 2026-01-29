@@ -15,6 +15,7 @@ import ee
 import ipywidgets as widgets
 from IPython.display import display
 import geopandas
+from scipy.spatial import cKDTree
 
 # Internal imports
 from .polygon_processing import create_channel_nw_polygon, plot_polygon
@@ -1151,13 +1152,6 @@ def plot_deposition_erosion_with_dates(bars, erosions, dates, centerlines, figsi
     })
     
     return fig, ax, summary_df
-
-import networkx as nx
-import numpy as np
-from shapely.geometry import Point, LineString, Polygon
-from scipy.spatial import cKDTree
-from tqdm import tqdm
-
 
 def _map_rook_nodes(G_rook_t1, G_rook_t2, iou_threshold=0.5):
     """Maps nodes in G_rook between two timesteps based on polygon IoU."""

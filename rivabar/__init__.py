@@ -18,7 +18,9 @@ from .utils import (
     resample_and_smooth, compute_s_distance, find_closest_negative_minimum,
     visualize_curvature_circles, correlate_curves, visualize_dtw_correlations,
     resample_channel_width_to_centerline, get_width_and_curvature,
-    compute_migration_distances, analyze_river_pairs_filtered
+    compute_migration_distances, analyze_river_pairs_filtered,
+    plot_dtw_correlation, detect_high_variance_segments,
+    run_dtw_by_stable_segments, plot_dtw_segments, create_dataframe_from_results
 )
 
 # Import geometry utilities
@@ -33,7 +35,8 @@ from .geometry_utils import (
 from .data_io import (
     process_band, read_landsat_data, read_water_index, create_mndwi,
     save_shapefiles, crop_geotiff, read_and_plot_im,
-    downsample_raster, save_planetscope_river_result, MinimalDataset
+    downsample_raster, save_planetscope_river_result, MinimalDataset,
+    create_water_mask_from_mapping, create_water_mask_from_river
 )
 
 # Import polygon processing functions
@@ -98,7 +101,8 @@ __all__ = [
     'resample_and_smooth', 'compute_s_distance', 'find_closest_negative_minimum',
     'visualize_curvature_circles', 'correlate_curves', 'visualize_dtw_correlations',
     'resample_channel_width_to_centerline', 'get_width_and_curvature',
-    'compute_migration_distances', 'analyze_river_pairs_filtered',
+    'compute_migration_distances', 'analyze_river_pairs_filtered', 'create_dataframe_from_results',
+    'plot_dtw_correlation', 'detect_high_variance_segments', 'run_dtw_by_stable_segments', 'plot_dtw_segments',
     
     # Geometry utilities
     'convert_to_utm', 'convert_geographic_proj_to_utm', 'closest_point_on_segment',
@@ -111,6 +115,7 @@ __all__ = [
     'save_shapefiles', 'crop_geotiff', 'read_and_plot_im', 'gdfs_from_D_primal',
     'write_shapefiles_and_graphs', 'merge_and_plot_channel_polygons', 
     'downsample_raster', 'save_planetscope_river_result', 'MinimalDataset',
+    'create_water_mask_from_mapping', 'create_water_mask_from_river',
     
     # Polygon processing
     'smooth_polygon', 'smooth_line', 'vertex_density_tolerance', 'smooth_banklines',

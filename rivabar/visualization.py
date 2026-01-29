@@ -13,11 +13,12 @@ from .geometry_utils import find_closest_point, getExtrapolatedLine, angle_betwe
 from .polygon_processing import smooth_line, remove_endpoints, vertex_density_tolerance, create_main_channel_banks
 
 def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, 
-                G_primal, D_primal, dataset=None, plot_main_banklines=True, plot_lines=True, plot_image=True,
+                G_primal, D_primal=None, plot_main_banklines=True, plot_lines=True, plot_image=True, 
                 smoothing=False, start_x=None, start_y=None, end_x=None, end_y=None,
-                cmap='Grays', alpha=0.5, ax=None, bankline_color='tab:blue', bankline_alpha=1.0):
+                bankline_color='tab:blue', bankline_alpha=1.0,
+                cmap='Grays', alpha=0.5, ax=None):
     """
-    Plots an image with overlaid lines representing bank polygons and edges from two graphs.
+    Plots an image with overlaid lines representing bank polygons and centerlines from graphs.
 
     Parameters
     ----------
@@ -35,12 +36,16 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
         A graph where nodes contain 'bank_polygon' attributes representing bank polygons.
     G_primal : networkx.Graph
         A graph where edges contain 'geometry' attributes representing edge geometries.
+    D_primal : networkx.DiGraph, optional
+        A directed graph containing main channel bank coordinates in graph attributes.
     plot_main_banklines : bool, optional
-        If True, plot the main banklines (default is True).
+        If True, plot the main channel banklines (default is True).
     plot_lines : bool, optional
-        If True, plot the centerlines (default is True).
+        If True, plot the centerlines from G_primal (default is True).
     plot_image : bool, optional
         If True, plot the image (default is True).
+    smoothing : bool, optional
+        If True, apply smoothing to the lines (default is False).
     start_x : float, optional
         The x-coordinate of the starting point for smoothing (default is None).
     start_y : float, optional
@@ -49,39 +54,73 @@ def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_r
         The x-coordinate of the ending point for smoothing (default is None).
     end_y : float, optional
         The y-coordinate of the ending point for smoothing (default is None).
+    bankline_color : str, optional
+        The color of the banklines (default is 'tab:blue').
+    bankline_alpha : float, optional
+        The transparency of the banklines (default is 1.0).
     cmap : str, optional
-        The colormap to use for the image (default is 'Blue_r').
+        The colormap to use for the image (default is 'Grays').
     alpha : float, optional
         The transparency of the image (default is 0.5).
-    bankline_color : str, optional
-        The color of the main banklines (default is 'tab:blue').
-    bankline_alpha : float, optional
-        The transparency of the main banklines (default is 1.0).
+    ax : matplotlib.axes.Axes, optional
+        The axes on which to plot. If None, creates new figure and axes.
 
     Returns
     -------
     fig : matplotlib.figure.Figure
         The resulting figure.
+    ax : matplotlib.axes.Axes
+        The axes object.
     """
     if ax is None:
         fig, ax = plt.subplots()
     else:
         fig = ax.get_figure()
     if plot_image:
-        plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap=cmap, alpha=alpha)
+        if im is None:
+            print('No image to plot!')
+        else:
+            plt.imshow(im, extent = [left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap=cmap, alpha=alpha)
     else:
         plt.axis('equal')
-    x1, y1, x2, y2 = create_main_channel_banks(G_rook, G_primal, D_primal, dataset=dataset)
-    plt.plot(x1, y1, color=bankline_color, alpha=bankline_alpha)
-    plt.plot(x2, y2, color=bankline_color, alpha=bankline_alpha)
-    # bank1_coords = D_primal.graph.get('main_channel_bank1_coords', None)
-    # bank2_coords = D_primal.graph.get('main_channel_bank2_coords', None)
-    # plt.plot(bank1_coords[:,0], bank1_coords[:,1], color=bankline_color, alpha=bankline_alpha)
-    # plt.plot(bank2_coords[:,0], bank2_coords[:,1], color=bankline_color, alpha=bankline_alpha)
+    
+    # Plot main channel banklines from nodes 0 and 1
+    for i in range(2):
+        if type(G_rook.nodes()[i]['bank_polygon']) == Polygon:
+            x = np.array(G_rook.nodes()[i]['bank_polygon'].exterior.xy[0])
+            y = np.array(G_rook.nodes()[i]['bank_polygon'].exterior.xy[1])
+            if smoothing and start_x is not None and end_x is not None:
+                ind1 = find_closest_point(start_x, start_y, np.vstack((x, y)).T)
+                ind2 = find_closest_point(end_x, end_y, np.vstack((x, y)).T)
+                if ind1 < ind2:
+                    x = x[ind1:ind2]
+                    y = y[ind1:ind2]
+                else:
+                    x = x[ind2:ind1]
+                    y = y[ind2:ind1]                
+        else:
+            x = np.array(G_rook.nodes()[i]['bank_polygon'].xy[0])
+            y = np.array(G_rook.nodes()[i]['bank_polygon'].xy[1])
+        if smoothing and len(x) > 31:
+            x, y = smooth_line(x, y, spline_ds=100, spline_smoothing=10000, 
+                              savgol_window=min(31, len(x)), savgol_poly_order=3)
+        if plot_main_banklines:
+            plt.plot(x, y, color=bankline_color, alpha=bankline_alpha)
+    
+    # Plot interior banklines (islands)
     for i in trange(2, len(G_rook.nodes)):
-        x_interior = G_rook.nodes()[i]['bank_polygon'].exterior.xy[0]
-        y_interior = G_rook.nodes()[i]['bank_polygon'].exterior.xy[1]
+        x_interior = np.array(G_rook.nodes()[i]['bank_polygon'].exterior.xy[0])
+        y_interior = np.array(G_rook.nodes()[i]['bank_polygon'].exterior.xy[1])
+        if smoothing and len(x_interior) > 21:
+            x_interior_sm = savgol_filter(x_interior, 21, 3)
+            y_interior_sm = savgol_filter(y_interior, 21, 3)
+            interior_lstr = LineString(zip(x_interior_sm, y_interior_sm))
+            x_int, y_int = remove_endpoints(interior_lstr, remove_count=1)
+            interior_lstr = LineString(zip(x_int, y_int)).simplify(3)
+            x_interior = np.array(interior_lstr.xy[0])
+            y_interior = np.array(interior_lstr.xy[1])
         plt.plot(x_interior, y_interior, '-', color=bankline_color, alpha=bankline_alpha)
+    
     if plot_lines:
         for s,e,d in tqdm(G_primal.edges):
             x = G_primal[s][e][d]['geometry'].xy[0]

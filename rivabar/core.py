@@ -60,6 +60,11 @@ def _initial_skeletonization_and_graph_setup(fname, dirname, start_x, start_y, e
     if mndwi is None:
         print('could not create MNDWI!')
         return None, None, None, None, None, None, None, None, None, None
+
+    # flat_data = mndwi.flatten()
+    # if np.mean(flat_data[flat_data != -np.inf]) > -0.02:
+    #     print('MNDWI is not valid!')
+    #     return None, None, None, None, None, None, None, None, None, None
     
     # Skeletonization
     print('running skeletonization')
@@ -821,7 +826,7 @@ def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
 
     if plot_D_primal:
         fig, ax = plot_im_and_lines(mndwi, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y,
-            G_rook, G_primal, D_primal, dataset=dataset, smoothing=False, start_x=start_x, start_y=start_y, end_x=end_x,
+            G_rook, G_primal, D_primal, smoothing=False, start_x=start_x, start_y=start_y, end_x=end_x,
             end_y=end_y, plot_lines=False)
         plot_graph_w_colors(D_primal, ax)
 

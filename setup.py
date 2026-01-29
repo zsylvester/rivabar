@@ -7,7 +7,7 @@ setup(
     name="rivabar",
     version="0.1.2",
     author="Zoltan Sylvester",
-    author_email="zsylvester@gmail.com",  # Replace with your actual email
+    author_email="zsylvester@gmail.com", 
     description="A Python package to automatically extract channel centerlines and banklines from water index images of rivers",
     long_description=long_description,
     long_description_content_type="text/markdown",
