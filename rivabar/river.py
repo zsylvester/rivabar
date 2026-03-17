@@ -242,6 +242,197 @@ class River:
             }
         return None
     
+    @property
+    def tributary_confluences(self):
+        """Get tributary confluence locations identified before dead-end removal.
+
+        Returns a list of dicts, each with:
+        - 'confluence_utm_coords': (x, y) UTM coordinates of the confluence point
+        - 'confluence_pixel_coords': (row, col) pixel coordinates
+        - 'branch_utm_coords': Nx2 array of UTM coordinates along the tributary
+        - 'branch_pixel_coords': Nx2 array of pixel coordinates along the tributary
+        - 'branch_length_pixels': total length of the branch in pixels
+          (measured along edge geometry, not node count)
+
+        Sorted by branch length (largest tributaries first).
+        """
+        self._check_processed()
+        return self._D_primal.graph.get('tributary_confluences', [])
+
+    def split_main_path_at_points(self, split_points):
+        """
+        Split the main path into segments at the given UTM coordinates.
+
+        Each split point is projected onto the nearest vertex along the main
+        path centerline. Edges are split within their geometry when needed,
+        so the split is accurate even when the main path consists of very
+        few (or a single) long edges.
+
+        The method creates lightweight synthetic edge entries in the
+        ``D_primal`` graph for the sub-edges produced by each split so that
+        the returned sub-paths work with ``get_channel_widths(path=...)``.
+
+        Parameters
+        ----------
+        split_points : list of tuple
+            UTM coordinates ``(x, y)`` at which to split. These typically come
+            from :func:`find_common_confluences`. Order does not matter; they
+            are sorted by along-channel distance internally.
+
+        Returns
+        -------
+        segments : list of list
+            Each element is a sub-path (list of ``(s, e, d)`` edge tuples)
+            that can be passed to ``get_channel_widths(path=...)`` or the
+            pairwise analysis functions.
+        split_info : list of dict
+            For each split point (in along-channel order), a dict with:
+            - 'utm_coords': the requested split point
+            - 'snapped_utm_coords': the nearest point on the centerline
+            - 'along_channel_distance': cumulative distance along the path
+            - 'snapping_distance': distance from requested to snapped point
+        """
+        self._check_processed()
+        path = self.main_path
+        if path is None:
+            raise ValueError("No main path available.")
+
+        # Build a continuous coordinate array and track which edge / local
+        # index each vertex belongs to
+        all_x, all_y = [], []
+        edge_indices = []   # index into path
+        local_indices = []  # index within that edge's geometry
+        for idx, (s, e, d) in enumerate(path):
+            geom = self._D_primal[s][e][d]['geometry']
+            xs, ys = geom.xy
+            n = len(xs)
+            all_x.extend(xs)
+            all_y.extend(ys)
+            edge_indices.extend([idx] * n)
+            local_indices.extend(range(n))
+
+        all_x = np.array(all_x)
+        all_y = np.array(all_y)
+        edge_indices = np.array(edge_indices)
+        local_indices = np.array(local_indices)
+
+        # Cumulative along-channel distance
+        dx = np.diff(all_x)
+        dy = np.diff(all_y)
+        ds = np.sqrt(dx**2 + dy**2)
+        s_cum = np.concatenate([[0], np.cumsum(ds)])
+
+        # For each split point, find the nearest centerline vertex
+        centerline_pts = np.column_stack([all_x, all_y])
+        split_data = []
+        for sp in split_points:
+            sp = np.array(sp)
+            dists = np.sqrt(np.sum((centerline_pts - sp)**2, axis=1))
+            nearest_idx = int(np.argmin(dists))
+            split_data.append({
+                'utm_coords': (float(sp[0]), float(sp[1])),
+                'snapped_utm_coords': (float(all_x[nearest_idx]),
+                                       float(all_y[nearest_idx])),
+                'along_channel_distance': float(s_cum[nearest_idx]),
+                'snapping_distance': float(dists[nearest_idx]),
+                'global_idx': nearest_idx,
+                'edge_index': int(edge_indices[nearest_idx]),
+                'local_index': int(local_indices[nearest_idx]),
+            })
+
+        # Sort by along-channel distance and deduplicate
+        split_data.sort(key=lambda d: d['along_channel_distance'])
+
+        # ---- Build segments by slicing edges at the split vertices ----------
+        # We process the path edge by edge. For each edge we track which split
+        # points fall inside it (by edge_index) and slice accordingly.
+        splits_by_edge = {}  # edge_index -> list of local_index values
+        for sd in split_data:
+            ei = sd['edge_index']
+            li = sd['local_index']
+            splits_by_edge.setdefault(ei, []).append(li)
+
+        # Ensure unique ids for synthetic edges we add to the graph
+        max_key = 0
+        for s_node, e_node, k in self._D_primal.edges(keys=True):
+            if isinstance(k, int) and k > max_key:
+                max_key = k
+        next_key = max_key + 1000  # offset to avoid collisions
+
+        segments = [[]]  # start with one empty segment; new ones added at splits
+
+        for path_idx, (s_node, e_node, d_key) in enumerate(path):
+            edge_data = self._D_primal[s_node][e_node][d_key]
+            geom_coords = list(edge_data['geometry'].coords)
+            hw_keys = list(edge_data['half_widths'].keys())
+            hw0 = list(edge_data['half_widths'][hw_keys[0]])
+            hw1 = list(edge_data['half_widths'][hw_keys[1]])
+            n_pts = len(geom_coords)
+
+            if path_idx not in splits_by_edge:
+                # No splits in this edge — add it whole to current segment
+                segments[-1].append((s_node, e_node, d_key))
+                continue
+
+            # Split this edge at the local indices
+            cut_indices = sorted(set(splits_by_edge[path_idx]))
+            # Clamp: don't split at the very first or last point
+            cut_indices = [ci for ci in cut_indices if 0 < ci < n_pts - 1]
+
+            if not cut_indices:
+                segments[-1].append((s_node, e_node, d_key))
+                # Still need to start a new segment after
+                segments.append([])
+                continue
+
+            # Slice the edge into pieces
+            boundaries = [0] + cut_indices + [n_pts]
+            for i in range(len(boundaries) - 1):
+                start = boundaries[i]
+                end = boundaries[i + 1]
+                # Include the boundary point in both segments (end of prev,
+                # start of next) so there are no gaps
+                if i > 0:
+                    start = boundaries[i]  # overlap: this point is shared
+                slice_end = end + 1 if end < n_pts else end  # inclusive end
+                sub_coords = geom_coords[start:slice_end]
+                sub_hw0 = hw0[start:slice_end]
+                sub_hw1 = hw1[start:slice_end]
+
+                if len(sub_coords) < 2:
+                    continue
+
+                # Create a synthetic edge in D_primal for this sub-segment
+                syn_key = next_key
+                next_key += 1
+                self._D_primal.add_edge(s_node, e_node, key=syn_key,
+                    geometry=LineString(sub_coords),
+                    half_widths={hw_keys[0]: sub_hw0, hw_keys[1]: sub_hw1},
+                    mm_len=edge_data.get('mm_len', 0),
+                    width=edge_data.get('width', 0),
+                    _synthetic=True,
+                )
+                segments[-1].append((s_node, e_node, syn_key))
+
+                # Start a new segment after each cut (except the last piece)
+                if i < len(boundaries) - 2:
+                    segments.append([])
+
+        # Remove empty segments
+        segments = [seg for seg in segments if len(seg) > 0]
+
+        # Build split_info
+        split_info = []
+        for sd in split_data:
+            split_info.append({
+                'utm_coords': sd['utm_coords'],
+                'snapped_utm_coords': sd['snapped_utm_coords'],
+                'along_channel_distance': sd['along_channel_distance'],
+                'snapping_distance': sd['snapping_distance'],
+            })
+
+        return segments, split_info
+
     # Analysis methods
     def get_channel_widths(self, path=None):
         """
@@ -328,6 +519,58 @@ class River:
         
         return fig, ax
     
+    def plot_tributaries(self, ax=None, color='r', linewidth=2, markersize=8,
+                         min_length=None, label=True):
+        """
+        Plot tributary branches and their confluence points.
+
+        Parameters
+        ----------
+        ax : matplotlib.Axes, optional
+            Axes to plot on. If None, creates an overview plot first.
+        color : str, optional
+            Color for tributary lines and markers (default 'r').
+        linewidth : float, optional
+            Line width for tributary branches (default 2).
+        markersize : float, optional
+            Marker size for confluence points (default 8).
+        min_length : float, optional
+            If set, only plot tributaries with branch_length_pixels >= this value.
+        label : bool, optional
+            If True, annotate each confluence with the tributary's pixel length
+            (default True).
+
+        Returns
+        -------
+        ax : matplotlib.Axes
+        """
+        self._check_processed()
+        tribs = self.tributary_confluences
+        if not tribs:
+            print("No tributaries found.")
+            return ax
+
+        if ax is None:
+            fig, ax = self.plot_overview()
+            plot_graph_w_colors(self._D_primal, ax)
+
+        for trib in tribs:
+            length = trib['branch_length_pixels']
+            if min_length is not None and length < min_length:
+                continue
+            if 'branch_utm_coords' in trib:
+                coords = trib['branch_utm_coords']
+                ax.plot(coords[:, 0], coords[:, 1], '-', color=color,
+                        linewidth=linewidth)
+            if 'confluence_utm_coords' in trib:
+                cx, cy = trib['confluence_utm_coords']
+                ax.plot(cx, cy, 'o', color=color, markersize=markersize)
+                if label:
+                    ax.annotate(f'{length:.0f} px', (cx, cy),
+                                textcoords='offset points', xytext=(5, 5),
+                                fontsize=8, color=color)
+        return ax
+
     def plot_directed_graph(self, ax=None, **kwargs):
         """
         Plot the directed centerline graph with colors.
@@ -871,8 +1114,15 @@ class River:
                                 successful_rivers.append(river_file)
                                 continue
                         
+                        # Mask clouds and cloud shadows using QA_PIXEL band
+                        # Bit 3 = cloud, bit 4 = cloud shadow
+                        qa = im.select('QA_PIXEL')
+                        cloud_mask = (qa.bitwiseAnd(1 << 3).eq(0)    # not cloud
+                                       .And(qa.bitwiseAnd(1 << 4).eq(0)))  # not cloud shadow
+                        im_masked = im.updateMask(cloud_mask)
+
                         # Calculate MNDWI
-                        mndwi = im.normalizedDifference([green_band, swir_band])
+                        mndwi = im_masked.normalizedDifference([green_band, swir_band])
                         
                         # Download to temporary file
                         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_file:

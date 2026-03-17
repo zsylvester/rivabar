@@ -24,11 +24,12 @@ from .geometry_utils import (
     insert_node, convert_to_utm, getExtrapolatedLine
 )
 from .graph_processing import (
-    remove_dead_ends, create_directed_multigraph, 
+    remove_dead_ends, create_directed_multigraph,
     get_rid_of_extra_lines_at_beginning_and_end,
     find_distance_between_nodes_and_other_node,
     find_pixel_distance_between_nodes_and_other_node,
-    extend_cline, find_start_node, traverse_multigraph
+    extend_cline, find_start_node, traverse_multigraph,
+    find_tributary_branches
 )
 from .utils import resample_and_smooth, find_numbers_between
 from .polygon_processing import smooth_banklines
@@ -240,10 +241,13 @@ def _find_main_path_with_fallbacks(graph, start_x, start_y, end_x, end_y, start_
                 print('could not find path')
     return graph, path, start_ind, end_ind
 
-def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius):
+def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius,
+                                    left_utm_x=None, upper_utm_y=None,
+                                    delta_x=None, delta_y=None,
+                                    min_tributary_length=100):
     """Phase 3: Find nodes within radius, remove dead ends, and extend edges."""
     print('Phase 3: Processing graph and extending edges')
-    
+
     # Find nodes within radius of main path
     nodes = []
     for node in tqdm(path):
@@ -251,10 +255,36 @@ def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius):
         for n in test:
             if n not in nodes:
                 nodes.append(n)
-    
+
     # Create subgraph and clean it up
     G = graph.subgraph(nodes).copy()
+
+    # Identify tributary branches before removing dead ends
+    tributaries = find_tributary_branches(G, start_ind, end_ind,
+                                         min_branch_length=min_tributary_length)
+
+    # Convert tributary confluence coordinates to UTM if geo-referencing is available
+    if left_utm_x is not None and tributaries:
+        for trib in tributaries:
+            if trib['confluence_pixel_coords'] is not None:
+                row, col = trib['confluence_pixel_coords']
+                utm_x, utm_y = convert_to_utm(
+                    np.array([col]), np.array([row]),
+                    left_utm_x, upper_utm_y, delta_x, delta_y
+                )
+                trib['confluence_utm_coords'] = (float(utm_x[0]), float(utm_y[0]))
+            if trib['branch_pixel_coords'].size > 0:
+                rows = trib['branch_pixel_coords'][:, 0]
+                cols = trib['branch_pixel_coords'][:, 1]
+                utm_xs, utm_ys = convert_to_utm(
+                    cols, rows, left_utm_x, upper_utm_y, delta_x, delta_y
+                )
+                trib['branch_utm_coords'] = np.column_stack([utm_xs, utm_ys])
+
     G = remove_dead_ends(G, start_ind, end_ind)
+
+    # Store tributary information on the graph
+    G.graph['tributary_confluences'] = tributaries
     
     # Remove edges that link a node to itself
     G = _remove_self_loops(G)
@@ -725,11 +755,12 @@ def _create_rook_graph(gdf2, poly1_utm, poly2_utm, mndwi, dataset, ch_belt_half_
     return G_rook
 
 
-def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type, 
-    ch_belt_smooth_factor=1e9, remove_smaller_components=True, delete_pixels_polys=False, 
+def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
+    ch_belt_smooth_factor=1e9, remove_smaller_components=True, delete_pixels_polys=False,
     ch_belt_half_width=2000, water_index_type='mndwi', mndwi_threshold=0.01, small_hole_threshold=64, plot_D_primal=False,
-    min_g_primal_length=100000, solidity_filter=True, radius=50, min_main_path_length=2000, 
-    flip_outlier_edges=False, check_edges=False, filter_contours=False):
+    min_g_primal_length=100000, solidity_filter=True, radius=50, min_main_path_length=2000,
+    flip_outlier_edges=False, check_edges=False, filter_contours=False,
+    min_tributary_length=100):
     """
     Map channel centerlines and banks from a georeferenced image.
     
@@ -759,7 +790,10 @@ def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
         return None, None, None, None, None, None, None, None, None, None, None
     
     # Phase 3: Process graph and extend edges
-    G = _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius)
+    G = _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius,
+                                        left_utm_x=left_utm_x, upper_utm_y=upper_utm_y,
+                                        delta_x=delta_x, delta_y=delta_y,
+                                        min_tributary_length=min_tributary_length)
     
     # Phase 4: Extract and smooth main path
     path_result = _extract_and_smooth_main_path(G, start_ind, end_ind, min_main_path_length)
@@ -819,6 +853,9 @@ def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
         D_primal.graph['main_channel_bank1_coords'] = np.vstack((x_utm1, y_utm1)).T
         D_primal.graph['main_channel_bank2_coords'] = np.vstack((x_utm2, y_utm2)).T
     
+    # Carry tributary confluence information from skeleton graph to D_primal
+    D_primal.graph['tributary_confluences'] = G.graph.get('tributary_confluences', [])
+
     # Set graph names
     D_primal.name = fname
     G_rook.name = fname

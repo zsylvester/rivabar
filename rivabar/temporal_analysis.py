@@ -9,6 +9,7 @@ import networkx as nx
 from tqdm import tqdm, trange
 from datetime import datetime
 from shapely.geometry import Polygon, MultiPolygon, Point, GeometryCollection
+from shapely.validation import make_valid
 from shapely.ops import unary_union
 from pyproj import Transformer
 import ee
@@ -673,7 +674,8 @@ def create_and_plot_bars(rivers, ts1, ts2, ax1=None, ax2=None, depo_cmap="Blues"
             all_bars = chs[i]
         else:
             all_bars = all_bars.union(bars[i]) # all depositional area up until this point in time
-        erosion = erosions[i].difference(all_bars) # remove net depositional areas from final erosion
+        # erosion = erosions[i].difference(all_bars) # remove net depositional areas from final erosion
+        erosion = erosions[i].buffer(0).difference(all_bars.buffer(0))
         erosions_final.append(erosion)
         if ax2: # plotting
             if type(erosion) == MultiPolygon or type(erosion) == GeometryCollection:
@@ -1369,3 +1371,329 @@ def calculate_node_displacement_deviation(D_primal_t1, D_primal_t2, primal_node_
         deviations[n1] = np.degrees(angle_rad)
         
     return deviations, distances
+
+
+def find_common_confluences(rivers, min_scene_fraction=0.5, width_scale_factor=3.0,
+                            min_branch_length=None):
+    """
+    Identify persistent tributary confluence locations across multiple river scenes.
+
+    Collects tributary confluences from all rivers, clusters them spatially
+    (using a distance threshold scaled to the mean channel width), and retains
+    only clusters that appear in at least ``min_scene_fraction`` of the scenes.
+
+    Parameters
+    ----------
+    rivers : list of River
+        Processed River objects (typically from the same Landsat path/row).
+        Each must have been processed with ``map_river_banks()``.
+    min_scene_fraction : float, optional
+        Minimum fraction of scenes in which a confluence must appear to be
+        considered persistent (default 0.5).
+    width_scale_factor : float, optional
+        The clustering distance threshold is set to
+        ``width_scale_factor * mean_channel_width`` (default 3.0).
+    min_branch_length : float, optional
+        If set, only consider tributary branches with
+        ``branch_length_pixels >= min_branch_length``.
+
+    Returns
+    -------
+    common_confluences : list of dict
+        Each dict contains:
+        - 'utm_coords': (x, y) centroid of the cluster in UTM
+        - 'n_scenes': number of scenes the confluence was found in
+        - 'scene_fraction': fraction of scenes
+        - 'member_coords': list of (x, y) coordinates from individual scenes
+    """
+    from .analysis import get_channel_widths_along_path
+
+    # Collect all confluence points with scene indices
+    all_points = []  # list of (x, y, river_index)
+    valid_rivers = []
+    for i, river in enumerate(rivers):
+        if not river._is_processed or not river._processing_successful:
+            continue
+        valid_rivers.append(i)
+        for trib in river.tributary_confluences:
+            if 'confluence_utm_coords' not in trib:
+                continue
+            if min_branch_length is not None and trib['branch_length_pixels'] < min_branch_length:
+                continue
+            x, y = trib['confluence_utm_coords']
+            all_points.append((x, y, i))
+
+    if not all_points:
+        print("No tributary confluences found across the provided rivers.")
+        return []
+
+    n_valid = len(valid_rivers)
+    min_scenes = max(1, int(np.ceil(min_scene_fraction * n_valid)))
+
+    # Estimate mean channel width across all valid rivers (in meters)
+    widths = []
+    for i in valid_rivers:
+        river = rivers[i]
+        try:
+            path = river.main_path
+            if path is None:
+                continue
+            xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(river._D_primal, path)
+            pixel_size = river._dataset.transform[0]
+            widths.append(np.nanmean(np.array(w) * pixel_size))
+        except Exception:
+            continue
+
+    if not widths:
+        mean_width = 500.0  # fallback
+        print(f"Could not estimate channel width; using default clustering distance of {mean_width * width_scale_factor:.0f} m")
+    else:
+        mean_width = float(np.nanmean(widths))
+
+    cluster_dist = width_scale_factor * mean_width
+    print(f"Mean channel width: {mean_width:.0f} m, clustering distance: {cluster_dist:.0f} m")
+
+    # Agglomerative clustering of confluence points
+    coords = np.array([(p[0], p[1]) for p in all_points])
+    scene_ids = np.array([p[2] for p in all_points])
+
+    # Use scipy hierarchical clustering with the distance threshold
+    from scipy.cluster.hierarchy import fcluster, linkage
+    if len(coords) == 1:
+        labels = np.array([1])
+    else:
+        Z = linkage(coords, method='average', metric='euclidean')
+        labels = fcluster(Z, t=cluster_dist, criterion='distance')
+
+    # Analyze clusters
+    common_confluences = []
+    for label in np.unique(labels):
+        mask = labels == label
+        cluster_coords = coords[mask]
+        cluster_scenes = scene_ids[mask]
+
+        # Count unique scenes in this cluster
+        unique_scenes = set(cluster_scenes)
+        n_scenes = len(unique_scenes)
+        scene_fraction = n_scenes / n_valid
+
+        if n_scenes >= min_scenes:
+            centroid = cluster_coords.mean(axis=0)
+            common_confluences.append({
+                'utm_coords': (float(centroid[0]), float(centroid[1])),
+                'n_scenes': n_scenes,
+                'scene_fraction': scene_fraction,
+                'member_coords': [(float(c[0]), float(c[1])) for c in cluster_coords],
+            })
+
+    # Sort by along-channel position (approximate: use distance from first river's start point)
+    if common_confluences and valid_rivers:
+        ref_river = rivers[valid_rivers[0]]
+        sx, sy = ref_river.start_x, ref_river.start_y
+        common_confluences.sort(
+            key=lambda c: (c['utm_coords'][0] - sx)**2 + (c['utm_coords'][1] - sy)**2
+        )
+
+    print(f"Found {len(common_confluences)} persistent confluences "
+          f"(out of {len(np.unique(labels))} total clusters, "
+          f"threshold: present in >= {min_scenes}/{n_valid} scenes)")
+
+    return common_confluences
+
+
+def match_river_segments(rivers, common_confluences, max_snapping_distance=None,
+                         width_scale_factor=2.0, min_rivers_per_segment=4):
+    """
+    Split all rivers at common confluences and group corresponding segments.
+
+    For each river, the main path is split at the common confluence locations.
+    A segment is kept only if its bounding confluence points snap within
+    ``max_snapping_distance`` of the river's centerline. Segments are then
+    grouped by index (i.e., segment 0 from all qualifying rivers form one
+    group, segment 1 from all qualifying rivers form another, etc.). Groups
+    with fewer than ``min_rivers_per_segment`` rivers are dropped.
+
+    Parameters
+    ----------
+    rivers : list of River
+        Processed River objects.
+    common_confluences : list of dict
+        Output of :func:`find_common_confluences`.
+    max_snapping_distance : float, optional
+        Maximum allowed distance (in metres) between a confluence point and
+        the nearest point on a river's centerline. Segments bounded by a
+        confluence that exceeds this threshold are excluded for that river.
+        If *None* (default), the threshold is set to
+        ``width_scale_factor * mean_channel_width``.
+    width_scale_factor : float, optional
+        Multiplier for mean channel width to set the default snapping
+        threshold (default 2.0). Ignored if *max_snapping_distance* is given.
+    min_rivers_per_segment : int, optional
+        Minimum number of rivers that must contribute a segment for it to be
+        included in the output (default 4).
+
+    Returns
+    -------
+    segment_groups : list of dict
+        One entry per valid segment index. Each dict contains:
+
+        - ``'segment_index'``: int — position along the channel (0 = most
+          upstream).
+        - ``'rivers'``: list of River — rivers that have a valid segment here.
+        - ``'paths'``: list of list — the sub-path edge lists, one per river
+          (same order as ``'rivers'``).
+        - ``'n_rivers'``: int — number of rivers in this group.
+        - ``'upstream_confluence'``: (x, y) or *None* for the first segment.
+        - ``'downstream_confluence'``: (x, y) or *None* for the last segment.
+    rejected : dict
+        Keyed by ``(river_index, segment_index)`` with the reason string.
+    """
+    from .analysis import get_channel_widths_along_path
+
+    split_points = [c['utm_coords'] for c in common_confluences]
+    n_confluences = len(split_points)
+    n_segments = n_confluences + 1  # segments between / outside confluences
+
+    # Estimate mean channel width for default threshold
+    if max_snapping_distance is None:
+        widths = []
+        for river in rivers:
+            if not river._is_processed or not river._processing_successful:
+                continue
+            try:
+                path = river.main_path
+                if path is None:
+                    continue
+                xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(
+                    river._D_primal, path)
+                pixel_size = river._dataset.transform[0]
+                widths.append(np.nanmean(np.array(w) * pixel_size))
+            except Exception:
+                continue
+        mean_width = float(np.nanmean(widths)) if widths else 500.0
+        max_snapping_distance = width_scale_factor * mean_width
+        print(f"Max snapping distance: {max_snapping_distance:.0f} m "
+              f"({width_scale_factor}x mean width of {mean_width:.0f} m)")
+
+    # Split each river at all confluence points, then merge segments
+    # across unreachable confluences so that the split boundaries align
+    # with the confluence markers in the visualization.
+    #
+    # For each river we:
+    #   1. Split at ALL confluence points (to obtain snapping distances).
+    #   2. Identify which confluences are reachable (snap within threshold).
+    #   3. Collapse segments across unreachable confluences by merging
+    #      their edge lists.
+    #   4. Assign each merged segment to the standard group keyed by its
+    #      most-downstream reachable confluence boundary.
+    #
+    # Group key: (up_conf_idx or None, down_conf_idx or None).
+    from collections import defaultdict
+    group_collector = defaultdict(lambda: {'rivers': [], 'paths': []})
+    rejected = {}
+
+    for ri, river in enumerate(rivers):
+        if not river._is_processed or not river._processing_successful:
+            rejected[(ri, 'all')] = 'river not processed'
+            continue
+        if river.main_path is None:
+            rejected[(ri, 'all')] = 'no main path'
+            continue
+
+        try:
+            segments, split_info = river.split_main_path_at_points(split_points)
+        except Exception as e:
+            rejected[(ri, 'all')] = f'split failed: {e}'
+            continue
+
+        snap_dists = [info['snapping_distance'] for info in split_info]
+        conf_reachable = [d <= max_snapping_distance for d in snap_dists]
+
+        # Pad segments if needed
+        while len(segments) < n_segments:
+            segments.append([])
+
+        # If no confluences are reachable, reject the entire river
+        if not any(conf_reachable):
+            rejected[(ri, 'all')] = (
+                f'no reachable confluences '
+                f'(snap distances: {[f"{d:.0f}" for d in snap_dists]}, '
+                f'threshold: {max_snapping_distance:.0f} m)')
+            continue
+
+        # Merge segments across unreachable confluences.
+        # Walk through segments 0..n_segments-1.  At each reachable
+        # confluence boundary, finalise the current merged segment;
+        # at unreachable boundaries, keep accumulating edges.
+        merged = []          # list of (edge_list, downstream_conf_index_or_None)
+        current_path = list(segments[0]) if segments[0] else []
+
+        for ci in range(n_confluences):
+            next_seg = segments[ci + 1] if (ci + 1) < len(segments) else []
+            if conf_reachable[ci]:
+                # Valid boundary — save current merged segment
+                merged.append((current_path, ci))
+                current_path = list(next_seg)
+            else:
+                # Unreachable — merge next segment into current
+                current_path.extend(next_seg)
+
+        # Final segment (extends to river end)
+        merged.append((current_path, None))
+
+        # Assign each merged segment to a group keyed by its actual
+        # upstream and downstream confluence boundaries.  When a
+        # confluence is unreachable the segment spans across it, so
+        # the key reflects the true (possibly wider) extent — e.g.
+        # (None, 1) instead of the standard (0, 1).
+        upstream_boundary = None  # None = river start
+        for path, down_ci in merged:
+            if not path:
+                # Advance upstream boundary even for empty segments
+                upstream_boundary = down_ci
+                continue
+            group_key = (upstream_boundary, down_ci)
+            group_collector[group_key]['rivers'].append(river)
+            group_collector[group_key]['paths'].append(path)
+            upstream_boundary = down_ci
+
+    # Apply minimum count and build output
+    segment_groups = []
+    for group_key in sorted(group_collector.keys(),
+                            key=lambda k: (k[0] if k[0] is not None else -1)):
+        g = group_collector[group_key]
+        up_idx, down_idx = group_key
+
+        if len(g['rivers']) < min_rivers_per_segment:
+            for river in g['rivers']:
+                ri = rivers.index(river)
+                rejected[(ri, group_key)] = (
+                    f'segment group too small '
+                    f'({len(g["rivers"])}/{min_rivers_per_segment})')
+            continue
+
+        upstream_conf = split_points[up_idx] if up_idx is not None else None
+        downstream_conf = split_points[down_idx] if down_idx is not None else None
+
+        segment_groups.append({
+            'segment_index': group_key,
+            'rivers': g['rivers'],
+            'paths': g['paths'],
+            'n_rivers': len(g['rivers']),
+            'upstream_confluence': upstream_conf,
+            'downstream_confluence': downstream_conf,
+        })
+
+    # Summary
+    total_valid = sum(g['n_rivers'] for g in segment_groups)
+    print(f"Matched {len(segment_groups)} segment groups, "
+          f"{total_valid} river-segment pairs "
+          f"(rejected {len(rejected)})")
+    for g in segment_groups:
+        up = g['segment_index'][0]
+        down = g['segment_index'][1]
+        up_label = f'confluence {up}' if up is not None else 'start'
+        down_label = f'confluence {down}' if down is not None else 'end'
+        print(f"  {up_label} -> {down_label}: {g['n_rivers']} rivers")
+
+    return segment_groups, rejected

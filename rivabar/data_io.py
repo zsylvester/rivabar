@@ -148,7 +148,7 @@ def read_water_index(dirname, fname, mndwi_threshold, type='mndwi'):
     return mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y
 
 
-def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_threshold=0.01, delete_pixels_polys=False, small_hole_threshold=64, remove_smaller_components=True, solidity_filter=False):
+def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_threshold=0.01, delete_pixels_polys=False, small_hole_threshold=64, remove_smaller_components=True, solidity_filter=False, max_water_fraction=0.15):
     """
     Create a Modified Normalized Difference Water Index (MNDWI) binary mask from input data.
     
@@ -180,7 +180,13 @@ def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_thre
     solidity_filter : bool, optional
         Whether to filter objects based on solidity (area/convex hull area).
         Objects with solidity < 0.2 will be removed. Default is False.
-        
+    max_water_fraction : float or None, optional
+        Maximum fraction of valid pixels that can be classified as water.
+        If exceeded, the scene is assumed to be cloud-contaminated (clouds
+        produce positive MNDWI values that get misclassified as water) and
+        the function returns None. Set to None to disable. Default is 0.15
+        (normal river scenes typically have 1-3% water).
+
     Returns
     -------
     mndwi : numpy.ndarray
@@ -230,7 +236,7 @@ def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_thre
             mndwi[mndwi != 1] = 0
         elif water_index_type == 'ddwi': # no need for thresholding with DDWI image
             pass
-        
+
         nxpix = mndwi.shape[1]
         nypix = mndwi.shape[0]
         right_utm_x = left_utm_x + delta_x*nxpix
@@ -239,6 +245,7 @@ def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_thre
         if type(mndwi_threshold) == str: # make sure that mndwi_threshold is a float
             mndwi_threshold = float(mndwi_threshold)
         equ, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, delta_x, delta_y = read_landsat_data(dirname, fname, mndwi_threshold = mndwi_threshold)
+
     if delete_pixels_polys: # set pixels to zero in areas defined by polygons (e.g., bridges)
         rst_arr = mndwi.astype('uint32').copy()
         shapes = ((geom, value) for geom, value in zip(delete_pixels_polys, np.ones((len(delete_pixels_polys),))))
@@ -248,6 +255,17 @@ def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_thre
     #     return None
     # removing small holes
     mndwi = remove_small_holes(mndwi.astype('bool'), float(small_hole_threshold)) # remove small bars / islands
+
+    # Check for cloud contamination: clouds produce positive MNDWI values
+    # that get misclassified as water, resulting in abnormally high water fraction.
+    # This check runs after hole removal, which fills gaps between cloud patches
+    # and gives a more accurate picture of what will be skeletonized.
+    if max_water_fraction is not None:
+        water_fraction = mndwi.sum() / mndwi.size
+        if water_fraction > max_water_fraction:
+            print(f'Scene appears cloud-contaminated: {water_fraction:.1%} of pixels classified as water (threshold: {max_water_fraction:.0%})')
+            return None, None, None, None, None, None, None, None
+
     if remove_smaller_components:
         # remove small components (= lakes) from water index image
         mndwi_labels = label(mndwi)

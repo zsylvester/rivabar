@@ -18,8 +18,8 @@ def remove_dead_ends(graph, start_node, end_node):
     """
     Remove dead-end nodes from a graph.
 
-    This function iteratively removes nodes from the graph that are not the 
-    start or end node and have fewer than two neighbors, which are considered 
+    This function iteratively removes nodes from the graph that are not the
+    start or end node and have fewer than two neighbors, which are considered
     dead ends.
 
     Parameters
@@ -46,6 +46,169 @@ def remove_dead_ends(graph, start_node, end_node):
             break
         graph.remove_nodes_from(nodes_to_be_removed) # delete nodes
     return graph
+
+
+def _edge_pixel_length(graph, u, v):
+    """Compute the total pixel length of an edge using its 'pts' coordinates.
+
+    For multigraphs, returns the length of the first (index-0) edge.
+    Falls back to Euclidean distance between node positions if 'pts' is missing.
+    """
+    if graph.is_multigraph():
+        edge_data = graph[u][v][0]
+    else:
+        edge_data = graph[u][v]
+    if 'pts' in edge_data:
+        pts = edge_data['pts']
+        if len(pts) >= 2:
+            diffs = np.diff(pts, axis=0)
+            return float(np.sum(np.sqrt(np.sum(diffs**2, axis=1))))
+    # Fallback: Euclidean distance between node positions
+    p1 = graph.nodes[u].get('o', np.array([0, 0]))
+    p2 = graph.nodes[v].get('o', np.array([0, 0]))
+    return float(np.sqrt(np.sum((p1 - p2)**2)))
+
+
+def _collect_edge_pts(graph, u, v):
+    """Return the 'pts' array for edge (u, v), or node positions as fallback."""
+    if graph.is_multigraph():
+        edge_data = graph[u][v][0]
+    else:
+        edge_data = graph[u][v]
+    if 'pts' in edge_data and len(edge_data['pts']) >= 2:
+        return edge_data['pts'].copy()
+    # Fallback: just the two node positions
+    p1 = graph.nodes[u].get('o', np.array([0, 0]))
+    p2 = graph.nodes[v].get('o', np.array([0, 0]))
+    return np.vstack([p1, p2])
+
+
+def find_tributary_branches(graph, start_node, end_node, min_branch_length=100):
+    """
+    Identify tributary branches (dead-end branches) before they are removed.
+
+    Traces each dead-end branch back to its junction node on the main network,
+    recording the confluence point and branch geometry. Only branches whose
+    total pixel length is at least ``min_branch_length`` are returned.
+
+    Parameters
+    ----------
+    graph : networkx.Graph
+        The input graph (before dead-end removal). Typically a multigraph
+        produced by ``sknw`` whose edges carry a ``'pts'`` attribute with
+        pixel coordinates.
+    start_node : node
+        The starting node of the main channel.
+    end_node : node
+        The ending node of the main channel.
+    min_branch_length : float, optional
+        Minimum total pixel length of a branch to be considered a tributary
+        (default 100). The length is measured along the edge ``'pts'``
+        coordinates, so it accounts for long edges between only two nodes.
+
+    Returns
+    -------
+    tributaries : list of dict
+        Each dict contains:
+        - 'confluence_node': node ID where the tributary meets the main network
+        - 'confluence_pixel_coords': (row, col) pixel coordinates of the confluence node
+        - 'branch_nodes': list of node IDs in the tributary branch (tip to confluence)
+        - 'branch_pixel_coords': Nx2 array of (row, col) pixel coordinates along
+          the branch, assembled from edge 'pts' data
+        - 'branch_length_pixels': total length of the branch in pixels
+    """
+    # First, find which nodes survive dead-end removal (simulate on a copy)
+    surviving = set(graph.nodes())
+    while True:
+        to_remove = []
+        for node in surviving:
+            if node == start_node or node == end_node:
+                continue
+            nbrs_in_surviving = [n for n in graph.neighbors(node) if n in surviving]
+            if len(nbrs_in_surviving) < 2:
+                to_remove.append(node)
+        if not to_remove:
+            break
+        surviving -= set(to_remove)
+
+    removed_nodes = set(graph.nodes()) - surviving
+    if not removed_nodes:
+        return []
+
+    tributaries = []
+
+    for component in nx.connected_components(graph.subgraph(removed_nodes)):
+        branch_nodes_set = component
+
+        # Find junction node(s): surviving nodes that neighbor this component
+        junction_nodes = set()
+        for node in branch_nodes_set:
+            for nbr in graph.neighbors(node):
+                if nbr in surviving:
+                    junction_nodes.add(nbr)
+
+        if not junction_nodes:
+            continue  # Isolated component, not a tributary
+
+        for junction in junction_nodes:
+            connecting_nodes = [n for n in branch_nodes_set if junction in graph.neighbors(n)]
+            if not connecting_nodes:
+                continue
+
+            # Trace the branch through the removed-node subgraph
+            branch_subgraph = graph.subgraph(branch_nodes_set)
+            entry_node = connecting_nodes[0]
+            try:
+                lengths = nx.single_source_shortest_path_length(branch_subgraph, entry_node)
+                tip_node = max(lengths, key=lengths.get)
+                path_nodes = nx.shortest_path(branch_subgraph, tip_node, entry_node)
+            except nx.NetworkXError:
+                path_nodes = list(branch_nodes_set)
+
+            # Compute total pixel length and collect full geometry from edge 'pts'
+            total_length = 0.0
+            all_pts_segments = []
+            for i in range(len(path_nodes) - 1):
+                u, v = path_nodes[i], path_nodes[i + 1]
+                total_length += _edge_pixel_length(graph, u, v)
+                pts = _collect_edge_pts(graph, u, v)
+                # Orient pts so they go from u toward v
+                u_pos = graph.nodes[u].get('o', np.array([0, 0]))
+                if len(pts) >= 2 and np.sum((pts[0] - u_pos)**2) > np.sum((pts[-1] - u_pos)**2):
+                    pts = pts[::-1]
+                # Avoid duplicating the junction point between segments
+                if all_pts_segments:
+                    pts = pts[1:]
+                all_pts_segments.append(pts)
+            # Also add the edge from entry_node to junction
+            total_length += _edge_pixel_length(graph, entry_node, junction)
+            pts = _collect_edge_pts(graph, entry_node, junction)
+            entry_pos = graph.nodes[entry_node].get('o', np.array([0, 0]))
+            if len(pts) >= 2 and np.sum((pts[0] - entry_pos)**2) > np.sum((pts[-1] - entry_pos)**2):
+                pts = pts[::-1]
+            if all_pts_segments:
+                pts = pts[1:]
+            all_pts_segments.append(pts)
+
+            if total_length < min_branch_length:
+                continue
+
+            branch_coords = np.vstack(all_pts_segments) if all_pts_segments else np.array([]).reshape(0, 2)
+
+            junction_data = graph.nodes[junction]
+            confluence_pixel = tuple(junction_data['o']) if 'o' in junction_data else None
+
+            tributaries.append({
+                'confluence_node': junction,
+                'confluence_pixel_coords': confluence_pixel,
+                'branch_nodes': path_nodes,
+                'branch_pixel_coords': branch_coords,
+                'branch_length_pixels': total_length,
+            })
+
+    # Sort by branch length (largest first)
+    tributaries.sort(key=lambda t: t['branch_length_pixels'], reverse=True)
+    return tributaries
 
 def find_distance_between_nodes_and_other_node(graph, nodes, other_node, left_utm_x, upper_utm_y, delta_x, delta_y):
     """
@@ -348,16 +511,17 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
     # that surround the bar (or rook node). The order of iterating through the edges makes sure
     # that the bar/island of interest already has some directed edges added.
     processed_nodes = [0, 1] # already processed the two main banklines
-    nit = 0
     while len(processed_nodes) < len(G_rook):
-        if nit > 1e8:
-            print('something went wrong, breaking while loop!')
-            break
         neighbors = []
         for node in processed_nodes: # collect neighbors of the already processed nodes
             for n in G_rook.neighbors(node):
                 if n not in neighbors and n not in processed_nodes:
                     neighbors.append(n)
+        if not neighbors:
+            # Remaining nodes are in disconnected components of G_rook, unreachable from nodes 0 and 1
+            remaining = set(G_rook.nodes()) - set(processed_nodes)
+            print(f'Warning: {len(remaining)} G_rook node(s) unreachable from main banklines, skipping: {remaining}')
+            break
         for node in neighbors:
             if node != 0 and node != 1:
                 vectors = []
@@ -415,7 +579,6 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
                                 D_primal[e][s][d][key] = G_primal[s][e][d][key]
                 if node not in processed_nodes:
                     processed_nodes.append(node)
-        nit += 1
     # finally, we go through all the 'G_primal' nodes and check if there are edges with 'weird' directions within a radius of 3
     # these outlier directions are then flipped (but only flipped once); this works well in complex networks (e.g., Lena Delta, Brahmaputra),
     # but not in mostly single-thread meandering rivers

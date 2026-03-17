@@ -18,9 +18,11 @@ from .utils import (
     resample_and_smooth, compute_s_distance, find_closest_negative_minimum,
     visualize_curvature_circles, correlate_curves, visualize_dtw_correlations,
     resample_channel_width_to_centerline, get_width_and_curvature,
-    compute_migration_distances, analyze_river_pairs_filtered,
+    compute_migration_distances, analyze_river_pairs_filtered, analyze_segment_group,
+    analyze_all_segment_groups,
     plot_dtw_correlation, detect_high_variance_segments,
-    run_dtw_by_stable_segments, plot_dtw_segments, create_dataframe_from_results
+    run_dtw_by_stable_segments, plot_dtw_segments, create_dataframe_from_results,
+    classify_pairs
 )
 
 # Import geometry utilities
@@ -52,7 +54,8 @@ from .graph_processing import (
     set_width_weights, find_end_nodes, flip_coords_and_widths,
     find_distance_between_nodes_and_other_node, find_pixel_distance_between_nodes_and_other_node,
     extend_cline, traverse_multigraph, find_start_node, check_edges_around_islands,
-    group_edges_to_subpaths, find_matching_subpaths, splice_paths, find_subpath
+    group_edges_to_subpaths, find_matching_subpaths, splice_paths, find_subpath,
+    find_tributary_branches
 )
 
 # Import analysis functions
@@ -63,7 +66,7 @@ from .analysis import (
     get_all_channel_widths, get_channel_mouth_polygon, filter_outlier_paths,
     classify_confluences_and_splits
 )
-from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation
+from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation, find_common_confluences, match_river_segments
 
 # Import temporal analysis functions
 from .temporal_analysis import (
@@ -76,12 +79,23 @@ from .temporal_analysis import (
 # Import visualization functions
 from .visualization import (
     plot_im_and_lines, plot_graph_w_colors,
-    plot_graph_mappings, plot_deviation_histogram
+    plot_graph_mappings, plot_deviation_histogram,
+    plot_river_segments, plot_centerline_comparison, plot_pair,
+    interactive_scatter, plot_prediction_map
 )
 
 # Import additional I/O functions
 from .data_io import (
     gdfs_from_D_primal, write_shapefiles_and_graphs, merge_and_plot_channel_polygons
+)
+
+# Import prediction functions
+from .prediction import (
+    depth_from_width, nominal_migration_rate, predicted_migration_rate,
+    calibrate_Cf, calibrate_kl, calibrate_from_curvature,
+    calibrate_pair, calibrate_segment, predict_forward,
+    detect_cutoff_risk, track_parameter_stability,
+    temporal_cross_validate
 )
 
 __version__ = "1.0.0"
@@ -101,8 +115,10 @@ __all__ = [
     'resample_and_smooth', 'compute_s_distance', 'find_closest_negative_minimum',
     'visualize_curvature_circles', 'correlate_curves', 'visualize_dtw_correlations',
     'resample_channel_width_to_centerline', 'get_width_and_curvature',
-    'compute_migration_distances', 'analyze_river_pairs_filtered', 'create_dataframe_from_results',
+    'compute_migration_distances', 'analyze_river_pairs_filtered', 'analyze_segment_group',
+    'analyze_all_segment_groups', 'create_dataframe_from_results',
     'plot_dtw_correlation', 'detect_high_variance_segments', 'run_dtw_by_stable_segments', 'plot_dtw_segments',
+    'classify_pairs',
     
     # Geometry utilities
     'convert_to_utm', 'convert_geographic_proj_to_utm', 'closest_point_on_segment',
@@ -128,6 +144,7 @@ __all__ = [
     'find_distance_between_nodes_and_other_node', 'find_pixel_distance_between_nodes_and_other_node',
     'extend_cline', 'traverse_multigraph', 'find_start_node', 'check_edges_around_islands',
     'group_edges_to_subpaths', 'find_matching_subpaths', 'splice_paths', 'find_subpath',
+    'find_tributary_branches',
     
     # Analysis functions
     'analyze_width_and_wavelength', 'compute_curvature', 'find_zero_crossings',
@@ -137,6 +154,7 @@ __all__ = [
     'classify_confluences_and_splits',
     
     # Temporal analysis
+    'find_common_confluences', 'match_river_segments',
     'calculate_iou', 'modified_iou', 'cluster_polygons', 'get_ch_and_bar_areas',
     'create_and_plot_bars', 'create_geodataframe_from_bank_polygons',
     'create_dataframe_from_bank_polygons', 'convert_to_landsat_crs',
@@ -144,5 +162,15 @@ __all__ = [
     
     # Visualization
     'plot_im_and_lines', 'plot_graph_w_colors',
-    'plot_graph_mappings', 'plot_deviation_histogram'
-] 
+    'plot_graph_mappings', 'plot_deviation_histogram',
+    'plot_river_segments', 'plot_centerline_comparison', 'plot_pair',
+    'interactive_scatter',
+    'plot_prediction_map',
+
+    # Prediction
+    'depth_from_width', 'nominal_migration_rate', 'predicted_migration_rate',
+    'calibrate_Cf', 'calibrate_kl', 'calibrate_from_curvature',
+    'calibrate_pair', 'calibrate_segment', 'predict_forward',
+    'detect_cutoff_risk', 'track_parameter_stability',
+    'temporal_cross_validate',
+]
