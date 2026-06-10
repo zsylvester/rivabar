@@ -95,7 +95,9 @@ from .prediction import (
     calibrate_Cf, calibrate_kl, calibrate_from_curvature,
     calibrate_pair, calibrate_segment, predict_forward,
     detect_cutoff_risk, track_parameter_stability,
-    temporal_cross_validate
+    temporal_cross_validate,
+    calibrate_local_kl, calibrate_pair_local, calibrate_segment_local,
+    predict_forward_local
 )
 
 __version__ = "1.0.0"
@@ -173,4 +175,6 @@ __all__ = [
     'calibrate_pair', 'calibrate_segment', 'predict_forward',
     'detect_cutoff_risk', 'track_parameter_stability',
     'temporal_cross_validate',
+    'calibrate_local_kl', 'calibrate_pair_local', 'calibrate_segment_local',
+    'predict_forward_local',
 ]
