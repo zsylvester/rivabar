@@ -1053,7 +1053,7 @@ def extract_centerline(fname, dirname, start_x, start_y, end_x, end_y, file_type
 
     # create geopandas dataframe from UTM polygons:
     gdf2 = geopandas.GeoDataFrame(utm_polys, columns = ['geometry'])
-    gdf2.set_crs(dataset.crs)
+    gdf2 = gdf2.set_crs(dataset.crs)
 
     print('creating linestrings for primal graph')
     with warnings.catch_warnings():

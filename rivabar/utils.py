@@ -1315,8 +1315,8 @@ def analyze_river_pairs_filtered(rivers, delta_s=100, smoothing_factor=1e6,
                 width_method=width_method, curvature_smoothing=True, 
                 savgol_factor=savgol_factor)
             
-            # Check mean width criterion (30m pixel size factor)
-            mean_width_m = np.mean(width) * 30
+            # Check mean width criterion (widths are already in meters)
+            mean_width_m = np.nanmean(width)
             
             if mean_width_m >= min_width_m:
                 filtered_rivers.append(river)

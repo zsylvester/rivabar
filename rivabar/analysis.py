@@ -484,6 +484,8 @@ def set_half_channel_widths(G_primal, G_rook, dataset, mndwi):
                             with warnings.catch_warnings():
                                 warnings.simplefilter("ignore", RuntimeWarning) # ignore warnings about invalid intersections
                                 intersection = G_rook.nodes()[node]['cl_polygon'].intersection(G_rook.nodes()[neighbor]['cl_polygon']).intersection(linestrings[i])
+                        else:
+                            continue # otherwise 'intersection' would be stale from a previous iteration
                         if type(intersection) == MultiLineString:
                             (s, e, d) = list(G_primal.edges)[i]
                             if (s, e, d) not in G_rook[node][neighbor]['G_primal_edges']:

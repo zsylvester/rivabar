@@ -151,8 +151,8 @@ def _find_main_path_with_fallbacks(graph, start_x, start_y, end_x, end_y, start_
             
             start_ind1, end_ind1, start_ind2, end_ind2 = find_graph_edges_close_to_start_and_end_points(graph, 
                 start_x, start_y, end_x, end_y, left_utm_x, upper_utm_y, delta_x, delta_y)
-            graph, start_ind_new = insert_node(graph, start_ind1, end_ind1, left_utm_x, upper_utm_y, delta_x, delta_y, start_ind, end_ind)
-            graph, end_ind_new = insert_node(graph, start_ind2, end_ind2, left_utm_x, upper_utm_y, delta_x, delta_y, end_ind, start_ind)
+            graph, start_ind_new = insert_node(graph, start_ind1, end_ind1, left_utm_x, upper_utm_y, delta_x, delta_y, start_x, start_y)
+            graph, end_ind_new = insert_node(graph, start_ind2, end_ind2, left_utm_x, upper_utm_y, delta_x, delta_y, end_x, end_y)
             
             try:
                 path = nx.shortest_path(graph, source=start_ind_new, target=end_ind_new, weight='weight')
@@ -581,7 +581,7 @@ def _create_UTM_geodataframe(gdf, poly1, poly2, left_utm_x, upper_utm_y, delta_x
 
     # create geopandas dataframe from UTM polygons:
     gdf2 = geopandas.GeoDataFrame(utm_polys, columns = ['geometry'])
-    gdf2.set_crs(dataset.crs)
+    gdf2 = gdf2.set_crs(dataset.crs)
 
     return gdf2, poly1_utm, poly2_utm
 
@@ -639,7 +639,7 @@ def _create_primal_graph(gdf2, xcoords1, ycoords1, xcoords2, ycoords2, left_utm_
             nodes, edges, sw = momepy.nx_to_gdf(G_primal, points=True, lines=True, spatial_weights=True)
     else:
         print('primal graph creation failed')
-        return None
+        return None, None, None
 
     # create a better, leaner primal graph (some edges are duplicated and they have to be removed)
     unique_node_pairs = edges[['node_start', 'node_end']][edges[['node_start', 'node_end']].duplicated() == False]
@@ -667,7 +667,7 @@ def _create_primal_graph(gdf2, xcoords1, ycoords1, xcoords2, ycoords2, left_utm_
         G_length += G_primal[s][e][d]['geometry'].length
     if G_length < min_g_primal_length:
         print('primal graph is too short')
-        return None
+        return None, None, None
 
     G_primal, primal_start_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords1, ycoords1, left_utm_x, upper_utm_y, delta_x, delta_y)
     G_primal, primal_end_ind = get_rid_of_extra_lines_at_beginning_and_end(G_primal, xcoords2, ycoords2, left_utm_x, upper_utm_y, delta_x, delta_y)
@@ -677,7 +677,7 @@ def _create_primal_graph(gdf2, xcoords1, ycoords1, xcoords2, ycoords2, left_utm_
 
     if len(G_primal) < 2:
         print('G_primal only has one node!')
-        return None
+        return None, None, None
 
     return G_primal, primal_start_ind, primal_end_ind
 

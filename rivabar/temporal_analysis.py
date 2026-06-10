@@ -1606,10 +1606,17 @@ def match_river_segments(rivers, common_confluences, max_snapping_distance=None,
             rejected[(ri, 'all')] = f'split failed: {e}'
             continue
 
+        # split_info and segments are in along-channel order, which can
+        # differ from the input order of common_confluences on sinuous
+        # rivers; conf_input_idx maps each along-channel boundary back to
+        # its index in common_confluences so that group keys are consistent
+        # across rivers.
         snap_dists = [info['snapping_distance'] for info in split_info]
         conf_reachable = [d <= max_snapping_distance for d in snap_dists]
+        conf_input_idx = [info.get('input_index', j)
+                          for j, info in enumerate(split_info)]
 
-        # Pad segments if needed
+        # Defensive: segments should always have n_confluences + 1 entries
         while len(segments) < n_segments:
             segments.append([])
 
@@ -1631,8 +1638,9 @@ def match_river_segments(rivers, common_confluences, max_snapping_distance=None,
         for ci in range(n_confluences):
             next_seg = segments[ci + 1] if (ci + 1) < len(segments) else []
             if conf_reachable[ci]:
-                # Valid boundary — save current merged segment
-                merged.append((current_path, ci))
+                # Valid boundary — save current merged segment, keyed by
+                # the confluence's index in common_confluences
+                merged.append((current_path, conf_input_idx[ci]))
                 current_path = list(next_seg)
             else:
                 # Unreachable — merge next segment into current

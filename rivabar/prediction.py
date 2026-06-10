@@ -126,17 +126,21 @@ def predicted_migration_rate(R0, s, D, Cf, Omega=-1.0, Gamma=2.5):
         # No downstream influence: R1 = (Omega + Gamma) * R0
         return (Omega + Gamma) * R0
 
-    # Normalized convolution: sum(R0 * G) / sum(G)
-    G_integral = np.sum(G) * ds
+    # Normalized convolution: sum(R0 * G) / sum(G), where the denominator at
+    # each point is the kernel mass actually available upstream of that point
+    # (a true weighted average; near the upstream boundary fewer points exist,
+    # so normalizing by the full kernel integral would attenuate the term and
+    # flip the sign of R1 there)
     conv_full = np.convolve(R0, G, mode='full')[:n] * ds
-    upstream_term = conv_full / G_integral
+    norm = np.convolve(np.ones(n), G, mode='full')[:n] * ds
+    upstream_term = conv_full / norm
 
     R1 = Omega * R0 + Gamma * upstream_term
     return R1
 
 
 def calibrate_Cf(R0, observed_mr, s, D, Cf_range=(0.001, 0.02),
-                 Omega=-1.0, Gamma=2.5):
+                 Omega=-1.0, Gamma=2.5, mask=None):
     """
     Optimize the friction factor Cf to minimize the phase shift between
     predicted and observed migration rates.
@@ -157,6 +161,10 @@ def calibrate_Cf(R0, observed_mr, s, D, Cf_range=(0.001, 0.02),
         Local weight (default -1.0).
     Gamma : float, optional
         Upstream weight (default 2.5).
+    mask : array_like of bool, optional
+        Points to use when scoring the correlation. The prediction is always
+        computed on the full contiguous arrays (the convolution requires
+        uniform spacing); the mask only restricts the statistics.
 
     Returns
     -------
@@ -167,10 +175,12 @@ def calibrate_Cf(R0, observed_mr, s, D, Cf_range=(0.001, 0.02),
     """
     R0 = np.asarray(R0, dtype=float)
     observed_mr = np.asarray(observed_mr, dtype=float)
+    if mask is None:
+        mask = np.ones(len(R0), dtype=bool)
 
     def neg_correlation(Cf):
         R1 = predicted_migration_rate(R0, s, D, Cf, Omega, Gamma)
-        r = np.corrcoef(R1, observed_mr)[0, 1]
+        r = np.corrcoef(R1[mask], observed_mr[mask])[0, 1]
         return -r
 
     result = minimize_scalar(neg_correlation, bounds=Cf_range, method='bounded')
@@ -214,7 +224,7 @@ def calibrate_kl(predicted, observed, percentile=75):
 def calibrate_from_curvature(curvature, observed_mr, s, W,
                              Cf_range=(0.001, 0.02),
                              Omega=-1.0, Gamma=2.5,
-                             kl_percentile=75):
+                             kl_percentile=75, mask=None):
     """
     Full calibration of D, Cf, and kl from curvature and observed migration
     rate for a single pair.
@@ -243,6 +253,10 @@ def calibrate_from_curvature(curvature, observed_mr, s, W,
         Upstream weight (default 2.5).
     kl_percentile : float, optional
         Percentile for amplitude matching (default 75).
+    mask : array_like of bool, optional
+        Points to use for the calibration statistics (correlations and
+        percentiles). The prediction itself is always computed on the full
+        contiguous arrays, since the convolution assumes uniform spacing.
 
     Returns
     -------
@@ -264,6 +278,8 @@ def calibrate_from_curvature(curvature, observed_mr, s, W,
     curvature = np.asarray(curvature, dtype=float)
     observed_mr = np.asarray(observed_mr, dtype=float)
     s = np.asarray(s, dtype=float)
+    if mask is None:
+        mask = np.ones(len(curvature), dtype=bool)
 
     # Step 1: estimate depth
     D = depth_from_width(W)
@@ -272,8 +288,8 @@ def calibrate_from_curvature(curvature, observed_mr, s, W,
     # For constant curvature: R1 = (Omega + Gamma) * R0 = 1.5 * kl * W * C
     # Match the 75th percentile of |observed_mr| to 1.5 * kl * W * |C|_p75
     factor = Omega + Gamma  # should be 1.5
-    p_obs = np.percentile(np.abs(observed_mr), kl_percentile)
-    p_curv = np.percentile(np.abs(curvature), kl_percentile)
+    p_obs = np.percentile(np.abs(observed_mr[mask]), kl_percentile)
+    p_curv = np.percentile(np.abs(curvature[mask]), kl_percentile)
     if p_curv > 0 and W > 0 and abs(factor) > 0:
         kl_init = p_obs / (abs(factor) * W * p_curv)
     else:
@@ -281,21 +297,21 @@ def calibrate_from_curvature(curvature, observed_mr, s, W,
 
     # Compute nominal migration rate
     R0 = nominal_migration_rate(curvature, W, kl_init)
-    r_nominal = np.corrcoef(R0, observed_mr)[0, 1]
+    r_nominal = np.corrcoef(R0[mask], observed_mr[mask])[0, 1]
 
     # Step 3: optimize Cf
     Cf_opt, r_predicted = calibrate_Cf(R0, observed_mr, s, D, Cf_range,
-                                       Omega, Gamma)
+                                       Omega, Gamma, mask=mask)
 
     # Step 4: refine kl
     R1_unscaled = predicted_migration_rate(R0, s, D, Cf_opt, Omega, Gamma)
-    kl_scale = calibrate_kl(R1_unscaled, observed_mr, kl_percentile)
+    kl_scale = calibrate_kl(R1_unscaled[mask], observed_mr[mask], kl_percentile)
     kl_final = kl_init * kl_scale
 
     # Recompute with final kl
     R0_final = nominal_migration_rate(curvature, W, kl_final)
     R1_final = predicted_migration_rate(R0_final, s, D, Cf_opt, Omega, Gamma)
-    r_predicted_final = np.corrcoef(R1_final, observed_mr)[0, 1]
+    r_predicted_final = np.corrcoef(R1_final[mask], observed_mr[mask])[0, 1]
 
     return {
         'D': D,
@@ -357,7 +373,11 @@ def calibrate_pair(results, pair_idx, Cf_range=(0.001, 0.02),
     # Convert distances to migration rate
     observed_mr = distances / time_gap_years
 
-    # Determine which points to use for calibration
+    # Determine which points to use for the calibration statistics. The
+    # prediction is always computed on the full contiguous arrays: slicing
+    # out high-variance regions before the convolution would concatenate
+    # spatially disjoint points and distort the upstream-influence kernel.
+    mask = None
     if use_stable_segments:
         segment_results = pair_info.get('segment_results', [])
         if segment_results:
@@ -365,44 +385,23 @@ def calibrate_pair(results, pair_idx, Cf_range=(0.001, 0.02),
             mask = np.zeros(len(curvature), dtype=bool)
             for seg in segment_results:
                 mask[seg['start_idx']:seg['end_idx'] + 1] = True
-            curvature_cal = curvature[mask]
-            observed_mr_cal = observed_mr[mask]
-            s_cal = s[mask]
-        else:
-            curvature_cal = curvature
-            observed_mr_cal = observed_mr
-            s_cal = s
-    else:
-        curvature_cal = curvature
-        observed_mr_cal = observed_mr
-        s_cal = s
 
-    # Calibrate on stable segments
-    cal = calibrate_from_curvature(curvature_cal, observed_mr_cal, s_cal, W,
-                                   Cf_range, Omega, Gamma, kl_percentile)
+    # Calibrate; statistics restricted to stable segments via the mask
+    cal = calibrate_from_curvature(curvature, observed_mr, s, W,
+                                   Cf_range, Omega, Gamma, kl_percentile,
+                                   mask=mask)
 
-    # Recompute prediction on the full extent
-    R0_full = nominal_migration_rate(curvature, W, cal['kl'])
-    R1_full = predicted_migration_rate(R0_full, s, cal['D'], cal['Cf'],
-                                       Omega, Gamma)
-
-    cal['R0'] = R0_full
-    cal['R1'] = R1_full
-    cal['observed_mr'] = observed_mr
-    cal['s'] = s
     cal['date1'] = pair_info['date1']
     cal['date2'] = pair_info['date2']
     cal['time_gap_years'] = time_gap_years
     cal['pair_idx'] = pair_idx
 
     # Residual standard deviation (on stable segments only)
-    if use_stable_segments and segment_results:
-        R1_cal = predicted_migration_rate(
-            nominal_migration_rate(curvature_cal, W, cal['kl']),
-            s_cal, cal['D'], cal['Cf'], Omega, Gamma)
-        cal['residual_std'] = np.std(observed_mr_cal - R1_cal)
+    residuals = observed_mr - cal['R1']
+    if mask is not None:
+        cal['residual_std'] = np.std(residuals[mask])
     else:
-        cal['residual_std'] = np.std(observed_mr - R1_full)
+        cal['residual_std'] = np.std(residuals)
 
     return cal
 
@@ -733,10 +732,14 @@ def predict_forward_local(river, local_calibration, segment_calibration=None,
     # Works with both calibrate_pair_local and calibrate_segment_local output
     if 's_reference' in local_calibration:
         # calibrate_segment_local output
-        kl_s = local_calibration.get('kl_local_median',
-                                     local_calibration['kl_local_series'][0]['kl_median'])
+        if 'kl_local_median' in local_calibration:
+            kl_s = local_calibration['kl_local_median']
+        else:
+            # temporally-windowed calibration: use the most recent window
+            kl_s = local_calibration['kl_local_series'][-1]['kl_median']
         s_kl = local_calibration['s_reference']
-        Cf = local_calibration['Cf_global']
+        Cf = (local_calibration['Cf_global'] if 'Cf_global' in local_calibration
+              else local_calibration['Cf'])
         kl_global = np.nanmedian(kl_s)
     else:
         # calibrate_pair_local output
@@ -1618,7 +1621,8 @@ def calibrate_local_kl(curvature, observed_mr, s, W,
                        Omega=-1.0, Gamma=2.5,
                        kl_percentile=75,
                        window_length=None,
-                       min_window_points=20):
+                       min_window_points=20,
+                       mask=None):
     """
     Estimate spatially-varying kl along the channel using a moving window.
 
@@ -1653,6 +1657,11 @@ def calibrate_local_kl(curvature, observed_mr, s, W,
     min_window_points : int, optional
         Minimum number of points in a window for a valid kl estimate
         (default 20).
+    mask : array_like of bool, optional
+        Points to use for the calibration statistics (Cf correlation and
+        window percentiles), e.g. a stable-segment mask. The prediction is
+        always computed on the full contiguous arrays, since the convolution
+        assumes uniform spacing.
 
     Returns
     -------
@@ -1673,6 +1682,8 @@ def calibrate_local_kl(curvature, observed_mr, s, W,
     curvature = np.asarray(curvature, dtype=float)
     observed_mr = np.asarray(observed_mr, dtype=float)
     s = np.asarray(s, dtype=float)
+    if mask is None:
+        mask = np.ones(len(curvature), dtype=bool)
 
     # --- Step 1: depth ---
     D = depth_from_width(W)
@@ -1682,12 +1693,12 @@ def calibrate_local_kl(curvature, observed_mr, s, W,
     R0_unit = nominal_migration_rate(curvature, W, 1.0)
     if Cf is None:
         Cf, _ = calibrate_Cf(R0_unit, observed_mr, s, D, Cf_range,
-                             Omega, Gamma)
+                             Omega, Gamma, mask=mask)
 
     # --- Step 3: global kl for comparison ---
     R1_unit = predicted_migration_rate(R0_unit, s, D, Cf, Omega, Gamma)
-    p_obs = np.percentile(np.abs(observed_mr), kl_percentile)
-    p_r1 = np.percentile(np.abs(R1_unit), kl_percentile)
+    p_obs = np.percentile(np.abs(observed_mr[mask]), kl_percentile)
+    p_r1 = np.percentile(np.abs(R1_unit[mask]), kl_percentile)
     kl_global = p_obs / p_r1 if p_r1 > 0 else 1.0
 
     R0_global = nominal_migration_rate(curvature, W, kl_global)
@@ -1706,12 +1717,12 @@ def calibrate_local_kl(curvature, observed_mr, s, W,
     kl_values = []
     sc = s_min + half_win
     while sc <= s_max - half_win:
-        mask = (s >= sc - half_win) & (s <= sc + half_win)
-        n_pts = np.sum(mask)
+        in_window = (s >= sc - half_win) & (s <= sc + half_win) & mask
+        n_pts = np.sum(in_window)
         if n_pts >= min_window_points:
-            p_obs_local = np.percentile(np.abs(observed_mr[mask]),
+            p_obs_local = np.percentile(np.abs(observed_mr[in_window]),
                                         kl_percentile)
-            p_r1_local = np.percentile(np.abs(R1_unit[mask]),
+            p_r1_local = np.percentile(np.abs(R1_unit[in_window]),
                                        kl_percentile)
             kl_local = p_obs_local / p_r1_local if p_r1_local > 0 else kl_global
             window_centers.append(sc)
@@ -1785,41 +1796,28 @@ def calibrate_pair_local(results, pair_idx, use_stable_segments=True,
     W = np.mean(pair_info['width1'])
     observed_mr = distances / time_gap_years
 
-    # Mask to stable segments if requested
+    # Restrict calibration statistics to stable segments if requested.
+    # The arrays passed to calibrate_local_kl are always the full contiguous
+    # ones: slicing out high-variance regions before the convolution would
+    # concatenate spatially disjoint points and distort the kernel.
+    mask = None
     if use_stable_segments:
         segment_results = pair_info.get('segment_results', [])
         if segment_results:
             mask = np.zeros(len(curvature), dtype=bool)
             for seg in segment_results:
                 mask[seg['start_idx']:seg['end_idx'] + 1] = True
-            curvature_cal = curvature[mask]
-            observed_mr_cal = observed_mr[mask]
-            s_cal = s[mask]
-        else:
-            curvature_cal = curvature
-            observed_mr_cal = observed_mr
-            s_cal = s
-    else:
-        curvature_cal = curvature
-        observed_mr_cal = observed_mr
-        s_cal = s
 
-    cal = calibrate_local_kl(curvature_cal, observed_mr_cal, s_cal, W,
-                             **kwargs)
+    cal = calibrate_local_kl(curvature, observed_mr, s, W,
+                             mask=mask, **kwargs)
 
-    # Recompute on full extent if we used a subset
-    if use_stable_segments and pair_info.get('segment_results'):
-        R0_unit_full = nominal_migration_rate(curvature, W, 1.0)
-        R1_unit_full = predicted_migration_rate(R0_unit_full, s, cal['D'],
-                                                cal['Cf'],
-                                                kwargs.get('Omega', -1.0),
-                                                kwargs.get('Gamma', 2.5))
-        kl_local_full = np.interp(s, cal['s'], cal['kl_local'])
-        cal['kl_local_full'] = kl_local_full
-        cal['R1_local_full'] = kl_local_full * R1_unit_full
-        cal['R1_global_full'] = cal['kl_global'] * R1_unit_full
-        cal['observed_mr_full'] = observed_mr
-        cal['s_full'] = s
+    # Everything is already on the full extent; keep the *_full keys as
+    # aliases for backward compatibility with existing consumers
+    cal['kl_local_full'] = cal['kl_local']
+    cal['R1_local_full'] = cal['R1_local']
+    cal['R1_global_full'] = cal['R1_global']
+    cal['observed_mr_full'] = observed_mr
+    cal['s_full'] = s
 
     cal['date1'] = pair_info['date1']
     cal['date2'] = pair_info['date2']

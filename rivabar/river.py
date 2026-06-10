@@ -282,15 +282,23 @@ class River:
         Returns
         -------
         segments : list of list
-            Each element is a sub-path (list of ``(s, e, d)`` edge tuples)
-            that can be passed to ``get_channel_widths(path=...)`` or the
-            pairwise analysis functions.
+            Exactly ``len(split_points) + 1`` sub-paths in along-channel
+            order, so ``segments[i]`` always lies between the i-th and
+            (i+1)-th split point (along-channel order). Each element is a
+            list of ``(s, e, d)`` edge tuples that can be passed to
+            ``get_channel_widths(path=...)`` or the pairwise analysis
+            functions. An element can be an empty list when two split points
+            snap to the same vertex or a split point snaps to the path's
+            start or end.
         split_info : list of dict
             For each split point (in along-channel order), a dict with:
             - 'utm_coords': the requested split point
             - 'snapped_utm_coords': the nearest point on the centerline
             - 'along_channel_distance': cumulative distance along the path
             - 'snapping_distance': distance from requested to snapped point
+            - 'input_index': index of this split point in the input
+              ``split_points`` list (the input order can differ from the
+              along-channel order)
         """
         self._check_processed()
         path = self.main_path
@@ -325,7 +333,7 @@ class River:
         # For each split point, find the nearest centerline vertex
         centerline_pts = np.column_stack([all_x, all_y])
         split_data = []
-        for sp in split_points:
+        for input_idx, sp in enumerate(split_points):
             sp = np.array(sp)
             dists = np.sqrt(np.sum((centerline_pts - sp)**2, axis=1))
             nearest_idx = int(np.argmin(dists))
@@ -335,12 +343,13 @@ class River:
                                        float(all_y[nearest_idx])),
                 'along_channel_distance': float(s_cum[nearest_idx]),
                 'snapping_distance': float(dists[nearest_idx]),
+                'input_index': input_idx,
                 'global_idx': nearest_idx,
                 'edge_index': int(edge_indices[nearest_idx]),
                 'local_index': int(local_indices[nearest_idx]),
             })
 
-        # Sort by along-channel distance and deduplicate
+        # Sort by along-channel distance (input order may differ)
         split_data.sort(key=lambda d: d['along_channel_distance'])
 
         # ---- Build segments by slicing edges at the split vertices ----------
@@ -374,52 +383,45 @@ class River:
                 segments[-1].append((s_node, e_node, d_key))
                 continue
 
-            # Split this edge at the local indices
-            cut_indices = sorted(set(splits_by_edge[path_idx]))
-            # Clamp: don't split at the very first or last point
-            cut_indices = [ci for ci in cut_indices if 0 < ci < n_pts - 1]
+            # Split this edge at the local indices. Duplicates are kept so
+            # that every split point produces exactly one segment boundary
+            # (coincident split points yield empty segments) and segments
+            # stay positionally aligned with the split points.
+            cut_indices = sorted(splits_by_edge[path_idx])
 
-            if not cut_indices:
-                segments[-1].append((s_node, e_node, d_key))
-                # Still need to start a new segment after
-                segments.append([])
-                continue
-
-            # Slice the edge into pieces
-            boundaries = [0] + cut_indices + [n_pts]
+            # Slice the edge into pieces. Boundaries are inclusive vertex
+            # indices; the boundary vertex is shared between consecutive
+            # pieces so there are no gaps. A cut at the edge's first/last
+            # vertex yields a single-point piece, which is skipped, placing
+            # the segment boundary at the edge's end without losing it.
+            boundaries = [0] + cut_indices + [n_pts - 1]
             for i in range(len(boundaries) - 1):
                 start = boundaries[i]
                 end = boundaries[i + 1]
-                # Include the boundary point in both segments (end of prev,
-                # start of next) so there are no gaps
-                if i > 0:
-                    start = boundaries[i]  # overlap: this point is shared
-                slice_end = end + 1 if end < n_pts else end  # inclusive end
-                sub_coords = geom_coords[start:slice_end]
-                sub_hw0 = hw0[start:slice_end]
-                sub_hw1 = hw1[start:slice_end]
+                sub_coords = geom_coords[start:end + 1]
+                sub_hw0 = hw0[start:end + 1]
+                sub_hw1 = hw1[start:end + 1]
 
-                if len(sub_coords) < 2:
-                    continue
-
-                # Create a synthetic edge in D_primal for this sub-segment
-                syn_key = next_key
-                next_key += 1
-                self._D_primal.add_edge(s_node, e_node, key=syn_key,
-                    geometry=LineString(sub_coords),
-                    half_widths={hw_keys[0]: sub_hw0, hw_keys[1]: sub_hw1},
-                    mm_len=edge_data.get('mm_len', 0),
-                    width=edge_data.get('width', 0),
-                    _synthetic=True,
-                )
-                segments[-1].append((s_node, e_node, syn_key))
+                if len(sub_coords) >= 2:
+                    # Create a synthetic edge in D_primal for this sub-segment
+                    syn_key = next_key
+                    next_key += 1
+                    self._D_primal.add_edge(s_node, e_node, key=syn_key,
+                        geometry=LineString(sub_coords),
+                        half_widths={hw_keys[0]: sub_hw0, hw_keys[1]: sub_hw1},
+                        mm_len=edge_data.get('mm_len', 0),
+                        width=edge_data.get('width', 0),
+                        _synthetic=True,
+                    )
+                    segments[-1].append((s_node, e_node, syn_key))
 
                 # Start a new segment after each cut (except the last piece)
                 if i < len(boundaries) - 2:
                     segments.append([])
 
-        # Remove empty segments
-        segments = [seg for seg in segments if len(seg) > 0]
+        # Empty segments are kept: segments[i] must always lie between split
+        # points i-1 and i (along-channel order) for callers that pair
+        # segments with confluences by position
 
         # Build split_info
         split_info = []
@@ -429,35 +431,49 @@ class River:
                 'snapped_utm_coords': sd['snapped_utm_coords'],
                 'along_channel_distance': sd['along_channel_distance'],
                 'snapping_distance': sd['snapping_distance'],
+                'input_index': sd['input_index'],
             })
 
         return segments, split_info
 
     # Analysis methods
-    def get_channel_widths(self, path=None):
+    def get_channel_widths(self, path=None, pixel_size=None):
         """
         Get channel widths along the main path.
-        
+
         Parameters
         ----------
         path : list, optional
             Custom path as list of edge tuples. If None, uses main path.
-            
+        pixel_size : float, optional
+            Pixel size in meters, used to convert widths to meters. If None,
+            taken from the dataset transform; required for River objects
+            whose raster data has been cleared (e.g., loaded from older
+            pickles that did not save the transform).
+
         Returns
         -------
         np.ndarray
             Channel widths along the path
         """
         self._check_processed()
-        
+
         if path is None:
             path = self.main_path
         if path is None:
             raise ValueError("No main path available and no custom path provided.")
-            
+
+        if pixel_size is None:
+            if self._dataset is not None and getattr(self._dataset, 'transform', None) is not None:
+                pixel_size = self._dataset.transform[0]
+            else:
+                raise ValueError("No dataset transform available (raster data was cleared, "
+                                 "e.g. on a River loaded from an older pickle); "
+                                 "pass pixel_size explicitly.")
+
         xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(self._D_primal, path)
 
-        return s, np.array(w)*self._dataset.transform[0] # convert to meters
+        return s, np.array(w)*pixel_size # convert to meters
 
     
     def analyze_wavelength_and_width(self, path=None, ax=None, **kwargs):
@@ -750,14 +766,18 @@ class River:
             print(f"Directed graph: {len(self._D_primal.nodes)} nodes, {len(self._D_primal.edges)} edges")
             print(f"Rook graph: {len(self._G_rook.nodes)} polygons") 
             print(f"Primal graph: {len(self._G_primal.nodes)} nodes")
-            print(f"MNDWI shape: {self._mndwi.shape}")
-            
+            if self._mndwi is not None:
+                print(f"MNDWI shape: {self._mndwi.shape}")
+
             # Main path info
             if self.main_path:
                 print(f"Main path: {len(self.main_path)} edges")
-                s, widths = self.get_channel_widths()
-                print(f"Channel width: {np.mean(widths):.1f} ± {np.std(widths):.1f} m")
-                print(f"Channel length: {s[-1]:.1f} m")
+                try:
+                    s, widths = self.get_channel_widths()
+                    print(f"Channel width: {np.mean(widths):.1f} ± {np.std(widths):.1f} m")
+                    print(f"Channel length: {s[-1]:.1f} m")
+                except ValueError as e:
+                    print(f"Channel width: unavailable ({e})")
             
         print("=" * (20 + len(self.fname)))
 
@@ -784,16 +804,21 @@ class River:
             Dictionary containing GeoDataFrames for different components
         """
         self._check_processed()
-        
+
+        crs = getattr(self._dataset, 'crs', None) if self._dataset is not None else None
+        if crs is None:
+            print("Warning: no CRS available (raster data was cleared); "
+                  "GeoDataFrames will have no CRS")
+
         result = {}
-        
+
         # Main centerline
         if self.main_channel_centerline:
             result['centerline'] = gpd.GeoDataFrame(
                 [{'geometry': self.main_channel_centerline, 'name': self.fname}],
-                crs=self._dataset.crs
+                crs=crs
             )
-        
+
         # Banks
         banks = self.main_channel_banks
         if banks:
@@ -801,7 +826,7 @@ class River:
                 {'geometry': banks['left_bank'], 'side': 'left', 'name': self.fname},
                 {'geometry': banks['right_bank'], 'side': 'right', 'name': self.fname}
             ]
-            result['banks'] = gpd.GeoDataFrame(bank_data, crs=self._dataset.crs)
+            result['banks'] = gpd.GeoDataFrame(bank_data, crs=crs)
         
         # Channel polygons (from rook graph)
         polygons = []
@@ -814,8 +839,8 @@ class River:
                 })
         
         if polygons:
-            result['polygons'] = gpd.GeoDataFrame(polygons, crs=self._dataset.crs)
-        
+            result['polygons'] = gpd.GeoDataFrame(polygons, crs=crs)
+
         return result
     
     # Add these methods to the River class
@@ -848,9 +873,21 @@ class River:
             
             # Processing flags
             'processing_successful': self._processing_successful,
-            'is_processed': self._is_processed
+            'is_processed': self._is_processed,
+
+            # Dataset metadata (so loaded rivers can convert widths to
+            # meters and export with a CRS without the raster data)
+            'dataset_crs': (str(self._dataset.crs)
+                            if self._dataset is not None and getattr(self._dataset, 'crs', None) is not None
+                            else None),
+            'dataset_transform': (self._dataset.transform
+                                  if self._dataset is not None and getattr(self._dataset, 'transform', None) is not None
+                                  else None),
+            'dataset_shape': (self._dataset.shape
+                              if self._dataset is not None and getattr(self._dataset, 'shape', None) is not None
+                              else None),
         }
-        
+
         with open(filepath, 'wb') as f:
             pickle.dump(results, f)
         
@@ -889,10 +926,19 @@ class River:
         river._processing_successful = results['processing_successful']
         river._is_processed = results['is_processed']
         
-        # MNDWI and dataset are not loaded (saving memory)
+        # MNDWI is not loaded (saving memory); rebuild a minimal dataset
+        # from the saved metadata so width conversion and CRS export work
         river._mndwi = None
-        river._dataset = None
-        
+        if results.get('dataset_crs') or results.get('dataset_transform'):
+            from .data_io import MinimalDataset
+            river._dataset = MinimalDataset(
+                results.get('dataset_crs'),
+                results.get('dataset_transform'),
+                results.get('dataset_shape'),
+            )
+        else:
+            river._dataset = None
+
         print(f"Loaded results from {filepath}")
         return river
     
@@ -1670,6 +1716,7 @@ class River:
         if metadata['unique_dates']:
             metadata['primary_acquisition_date'] = sorted(metadata['unique_dates'])[0]
         else:
+            from datetime import datetime
             metadata['primary_acquisition_date'] = datetime.now().strftime('%Y-%m-%d')
         
         return metadata 
