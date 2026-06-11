@@ -1181,6 +1181,82 @@ def calculate_node_displacement_deviation(D_primal_t1, D_primal_t2, primal_node_
     return deviations, distances
 
 
+def filter_rivers_by_length(rivers, std_threshold=0.3, pixel_size=30.0):
+    """
+    Filter rivers by removing anomalously short channels.
+
+    Computes each river's main-channel centerline length and mean channel
+    width, then drops rivers whose centerline length falls more than
+    ``std_threshold`` standard deviations below the mean length across all
+    rivers. Useful for cleaning batch-processed scenes where the extraction
+    only captured part of the reach.
+
+    Parameters
+    ----------
+    rivers : list of River
+        Processed River objects.
+    std_threshold : float, optional
+        Number of standard deviations below the mean length to use as the
+        cutoff (default 0.3; e.g. 1.0 is more permissive).
+    pixel_size : float, optional
+        Pixel size in meters used to convert widths for rivers whose raster
+        data has been cleared (default 30). When a river still has its
+        dataset (or a saved transform), the pixel size is taken from there.
+
+    Returns
+    -------
+    filtered_rivers : list of River
+        Rivers whose centerline length exceeds the threshold.
+    filtered_lengths : list of float
+        Centerline lengths of the filtered rivers (m).
+    valid_indices : list of int
+        Indices of the filtered rivers in the input list.
+    ch_lengths : list of float
+        Centerline lengths of all input rivers (0 where unavailable).
+    ch_widths : list of float
+        Mean channel widths of all input rivers (m; 0 where unavailable).
+    threshold : float
+        The length threshold that was applied (m).
+    """
+    ch_lengths = []
+    ch_widths = []
+    for river in rivers:
+        try:
+            cl = river.main_channel_centerline
+        except Exception:
+            cl = None  # unprocessed/failed rivers count as zero-length
+        if cl is not None:
+            ch_lengths.append(cl.length)
+            ps = pixel_size
+            if river._dataset is not None and getattr(river._dataset, 'transform', None) is not None:
+                ps = river._dataset.transform[0]
+            try:
+                s, widths = river.get_channel_widths(pixel_size=ps)
+                ch_widths.append(float(np.nanmean(widths)))
+            except Exception as e:
+                print(f"Could not compute widths for {getattr(river, 'scene_id', None) or river.fname}: {e}")
+                ch_widths.append(0)
+        else:
+            print(f"No main channel centerline for {getattr(river, 'scene_id', None) or river.fname}")
+            ch_lengths.append(0)
+            ch_widths.append(0)
+
+    # Filter out anomalously low channel lengths
+    mean_length = np.mean(ch_lengths)
+    std_length = np.std(ch_lengths)
+    threshold = mean_length - std_threshold * std_length
+
+    valid_indices = [i for i, length in enumerate(ch_lengths) if length > threshold]
+    filtered_rivers = [rivers[i] for i in valid_indices]
+    filtered_lengths = [ch_lengths[i] for i in valid_indices]
+
+    print(f"Original number of rivers: {len(rivers)}")
+    print(f"Filtered number of rivers: {len(filtered_rivers)}")
+    print(f"Removed {len(rivers) - len(filtered_rivers)} anomalously short channels")
+
+    return filtered_rivers, filtered_lengths, valid_indices, ch_lengths, ch_widths, threshold
+
+
 def _estimate_mean_channel_width(rivers, default=500.0):
     """
     Estimate the mean channel width (in meters) across processed rivers.

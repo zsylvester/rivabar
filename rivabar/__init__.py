@@ -65,7 +65,7 @@ from .analysis import (
     get_all_channel_widths, get_channel_mouth_polygon, filter_outlier_paths,
     classify_confluences_and_splits
 )
-from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation, find_common_confluences, match_river_segments
+from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation, find_common_confluences, match_river_segments, filter_rivers_by_length
 
 # Import temporal analysis functions
 from .temporal_analysis import (
@@ -155,7 +155,7 @@ __all__ = [
     'classify_confluences_and_splits',
     
     # Temporal analysis
-    'find_common_confluences', 'match_river_segments',
+    'find_common_confluences', 'match_river_segments', 'filter_rivers_by_length',
     'calculate_iou', 'modified_iou', 'cluster_polygons', 'get_ch_and_bar_areas',
     'create_and_plot_bars', 'create_geodataframe_from_bank_polygons',
     'create_dataframe_from_bank_polygons', 'convert_to_landsat_crs',
