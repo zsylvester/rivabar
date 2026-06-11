@@ -778,6 +778,15 @@ class River:
             
         print("=" * (20 + len(self.fname)))
 
+    def collect_stats(self, pixel_size=None):
+        """
+        Collect summary statistics for this river.
+
+        Thin wrapper around :func:`collect_river_stats`; see its docstring
+        for the returned fields.
+        """
+        return collect_river_stats(self, pixel_size=pixel_size)
+
     def clear_raster_data(self):
         """
         Clear heavy raster data to save memory while keeping graph results.
@@ -1701,3 +1710,95 @@ class River:
             metadata['primary_acquisition_date'] = datetime.now().strftime('%Y-%m-%d')
         
         return metadata 
+
+def collect_river_stats(river, pixel_size=None):
+    """
+    Collect summary statistics from a processed River object.
+
+    Parameters
+    ----------
+    river : River
+        A processed River object.
+    pixel_size : float, optional
+        Pixel size in meters, forwarded to ``get_channel_widths``. Required
+        for rivers whose raster data has been cleared (e.g., loaded from
+        pickles without a saved transform).
+
+    Returns
+    -------
+    stats : dict
+        Dictionary with graph sizes (rook and primal), island degree
+        statistics, bank-node degrees, island area/length statistics,
+        channel width statistics, centerline length, and sinuosity.
+        Width/centerline entries are NaN when they cannot be computed.
+    """
+    river._check_processed()
+
+    stats = {}
+
+    G_rook = river._G_rook
+    G_primal = river._G_primal
+
+    # Graph sizes
+    stats['n_nodes_rook'] = G_rook.number_of_nodes()
+    stats['n_edges_rook'] = G_rook.number_of_edges()
+    stats['n_nodes_primal'] = G_primal.number_of_nodes()
+    stats['n_edges_primal'] = G_primal.number_of_edges()
+
+    # Degree distribution (islands only, skip bank nodes 0 and 1)
+    degrees = [G_rook.degree(n) for n in G_rook if n >= 2]
+    stats['degree_mean'] = np.mean(degrees) if degrees else np.nan
+    stats['degree_median'] = np.median(degrees) if degrees else np.nan
+    stats['degree_std'] = np.std(degrees) if degrees else np.nan
+
+    # First two nodes (banks)
+    stats['degree_node0'] = G_rook.degree(0) if 0 in G_rook else np.nan
+    stats['degree_node1'] = G_rook.degree(1) if 1 in G_rook else np.nan
+
+    # Island areas and lengths
+    island_areas = []
+    island_lengths = []
+    for node in G_rook:
+        if node < 2:  # skip the two bank nodes
+            continue
+        poly = G_rook.nodes[node].get('bank_polygon')
+        if poly is None or not hasattr(poly, 'area'):
+            # bank_polygon can be missing or an empty placeholder for
+            # islands whose polygon could not be built
+            continue
+        if poly.area > 0:
+            island_areas.append(poly.area)
+            island_lengths.append(poly.length)
+
+    stats['island_area_mean'] = np.mean(island_areas) if island_areas else np.nan
+    stats['island_area_median'] = np.median(island_areas) if island_areas else np.nan
+    stats['island_area_std'] = np.std(island_areas) if island_areas else np.nan
+    stats['island_length_mean'] = np.mean(island_lengths) if island_lengths else np.nan
+    stats['island_length_median'] = np.median(island_lengths) if island_lengths else np.nan
+    stats['island_length_std'] = np.std(island_lengths) if island_lengths else np.nan
+    stats['n_islands'] = len(island_areas)
+
+    # Channel widths and centerline
+    try:
+        s, widths = river.get_channel_widths(pixel_size=pixel_size)
+        stats['width_mean'] = np.nanmean(widths)
+        stats['width_median'] = np.nanmedian(widths)
+        stats['width_std'] = np.nanstd(widths)
+        stats['centerline_length'] = s[-1]
+
+        cl = river.main_channel_centerline
+        if cl is not None:
+            straight_line = np.sqrt((cl.coords[-1][0] - cl.coords[0][0])**2 +
+                                    (cl.coords[-1][1] - cl.coords[0][1])**2)
+            stats['sinuosity'] = cl.length / straight_line if straight_line > 0 else np.nan
+        else:
+            stats['sinuosity'] = np.nan
+    except Exception as e:
+        print(f"Width/centerline failed: {e}")
+        stats['width_mean'] = np.nan
+        stats['width_median'] = np.nan
+        stats['width_std'] = np.nan
+        stats['centerline_length'] = np.nan
+        stats['sinuosity'] = np.nan
+
+    return stats

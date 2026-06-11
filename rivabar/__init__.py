@@ -8,7 +8,7 @@ rivabar - A Python package to automatically extract channel centerlines and bank
 from .core import map_river_banks, main, extract_centerline
 
 # Import River class for object-oriented API
-from .river import River
+from .river import River, collect_river_stats
 
 # Import utility functions
 from .utils import (
@@ -108,7 +108,7 @@ __all__ = [
     'map_river_banks', 'main', 'extract_centerline',
     
     # River class (object-oriented API)
-    'River',
+    'River', 'collect_river_stats',
     
     # Utility functions
     'convert_to_uint8', 'normalized_difference', 'get_cmap', 'find_condition',
