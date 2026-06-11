@@ -19,12 +19,17 @@ between two land domains.
 `rivabar` can be used to map single-thread and multithread rivers, in an almost entirely automated fashion. It requires a water mask as input 
 and a start (source) and end (sink) points for the channel / channel belt / delta.
 
-The package now features a **object-oriented API** through the `River` class, which provides:
+The package features an **object-oriented API** through the `River` class, which provides:
 - **Intuitive workflow**: Create a river object, process it, and access results through properties
 - **Interactive tools**: Built-in methods for selecting start/end points and visualizing results  
 - **State management**: Automatic handling of processing state and data persistence
 - **Batch processing**: Class methods for processing multiple scenes efficiently
-- **Backward compatibility**: All original functions remain available and unchanged
+- **Backward compatibility**: The functional API (`map_river_banks` and friends) remains available
+
+Beyond centerline/bankline extraction, `rivabar` also includes:
+- **Multi-temporal analysis**: tributary detection, splitting rivers at persistent confluences, and matching segments across scenes (`find_common_confluences`, `match_river_segments`)
+- **Curvature–migration analysis**: DTW-based migration rate measurement between scenes and pair classification (`analyze_river_pairs_filtered`, `analyze_segment_group`, `classify_pairs`)
+- **Migration prediction**: calibration and forward prediction with the Howard & Knutson (1984) model, including spatially-varying erodibility (`calibrate_segment`, `predict_forward`, `calibrate_local_kl`; see Sylvester et al., 2019, Geology)
 
 The images below illustrate how `rivabar` extracts both centerlines and banklines from a Landsat image of the Brahmaputra River, and creates 
 an island neighborhood graph in addition to the centerline graph.
@@ -95,12 +100,13 @@ river.map_river_banks(
 
 # Access results through properties
 centerlines = river.directed_graph
-banklines = river.polygon_graph
+banklines = river.bankline_graph
 mndwi_image = river.mndwi
 
 # Analyze channel morphology
-widths = river.get_channel_widths()
+s, widths = river.get_channel_widths()  # along-channel distance and widths in meters
 wavelength_analysis = river.analyze_wavelength_and_width()
+stats = river.collect_stats()  # summary statistics dictionary
 
 # Visualize results
 river.plot_overview()
@@ -109,9 +115,9 @@ river.plot_overview()
 river.save_results("my_river_analysis.pkl")
 ```
 
-### Option 2: Original Functional API
+### Option 2: Functional API
 
-The original functional interface remains fully supported:
+The functional interface remains fully supported. Its main entry point is `map_river_banks`; the original `extract_centerline` function is kept as a backward-compatible alias (same parameters, same return values).
 
 #### Interactively Selecting Start/End Points
 
@@ -125,7 +131,7 @@ fname = "LC08_L2SP_232060_20140219_20200911_02_T1_SR" # Adjust filename/folder
 file_type = "multiple_tifs" # or 'water_index' if the water mask already exists
 
 # 1. Create the MNDWI water mask image
-mndwi, dataset = rb.create_mndwi(
+mndwi, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y, delta_x, delta_y, dataset = rb.create_mndwi(
     dirname=dirname,
     fname=fname,
     file_type=file_type,
@@ -134,10 +140,9 @@ mndwi, dataset = rb.create_mndwi(
     remove_smaller_components=True
 )
 
-# 2. Display the image
+# 2. Display the water mask
 fig, ax = plt.subplots(figsize=(10, 10))
-rb.plot_im_and_lines(mndwi, dataset.bounds.left, dataset.bounds.right, 
-                     dataset.bounds.bottom, dataset.bounds.top, ax=ax, plot_image=True, plot_lines=False)
+ax.imshow(mndwi, extent=[left_utm_x, right_utm_x, lower_utm_y, upper_utm_y], cmap='gray_r')
 plt.title("Click START point, then END point")
 plt.show() # Make sure the plot window appears
 
@@ -145,25 +150,14 @@ plt.show() # Make sure the plot window appears
 # Click on the plot: first for the start point, then for the end point.
 points = plt.ginput(n=2, timeout=-1) # timeout=-1 waits indefinitely
 
-# Close the plot window automatically if desired
-# plt.close(fig)
-
 # Extract coordinates
 start_x, start_y = points[0]
 end_x, end_y = points[1]
 
-# 4. Now you can use these coordinates in extract_centerline
-# D_primal, G_rook, G_primal, ... = rb.extract_centerline(
-#     fname=fname,
-#     dirname=dirname,
-#     start_x=start_x,
-#     start_y=start_y,
-#     end_x=end_x,
-#     end_y=end_y,
-#     file_type=file_type,
-#     ...
-# )
+# 4. Now you can use these coordinates in map_river_banks (see next section)
 ```
+
+(Alternatively, the `River` class wraps this workflow in `river.get_start_end_points_interactive()`.)
 
 #### Centerline Extraction (Functional API)
 
@@ -178,7 +172,7 @@ fname="LC08_L2SP_232060_20140219_20200911_02_T1_SR" # assumes that the Landsat b
 dirname="../data/Branco/" # parent folder of the 'LC08...' folder
 
 # Extract the channel centerline and related graphs
-D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys = rb.extract_centerline(
+D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys = rb.map_river_banks(
     fname=fname,
     dirname=dirname,
     start_x=start_x,
@@ -206,6 +200,8 @@ rb.save_shapefiles(
 )
 ```
 
+`rb.extract_centerline(...)` accepts the same arguments and returns the same values, so older scripts keep working unchanged.
+
 ### Analyzing Channel Widths and Morphology
 
 #### Using the Object-Oriented API
@@ -224,7 +220,7 @@ river = rb.River(
 river.map_river_banks()
 
 # Get channel widths along the main path
-widths = river.get_channel_widths()
+s, widths = river.get_channel_widths()
 
 # Analyze width-wavelength relationships
 wavelength_analysis = river.analyze_wavelength_and_width(
@@ -248,8 +244,9 @@ main_path = river.main_path
 import matplotlib.pyplot as plt
 import numpy as np
 
-# Get the main path through the channel network (assuming D_primal from previous example)
-edge_path = rb.get_main_path(D_primal)
+# The main path through the channel network is stored on the graph
+# (assuming D_primal from the previous example)
+edge_path = D_primal.graph['main_path']
 
 # Analyze channel width - wavelength scaling
 df, curv, s, loc_zero_curv, xsmooth, ysmooth = rb.analyze_width_and_wavelength(
@@ -276,12 +273,12 @@ plt.show()
 The `River` class provides many additional methods for advanced analysis:
 
 ```python
-# Batch processing multiple Landsat scenes
+# Batch processing multiple Landsat scenes (downloaded via Google Earth Engine)
 rivers = rb.River.batch_process_landsat_scenes(
     path_number=232, row_number=60,
     start_x=675796.2, start_y=98338.8,
     end_x=628190.3, end_y=-91886.6,
-    start_date='2020-01-01', end_date='2023-12-31'
+    years=range(2020, 2024), max_cloud_cover=10, n_scenes_per_year=3
 )
 
 # Load and analyze saved results
