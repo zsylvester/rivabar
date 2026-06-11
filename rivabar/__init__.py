@@ -43,6 +43,7 @@ from .data_io import (
 # Import polygon processing functions
 from .polygon_processing import (
     smooth_polygon, smooth_line, vertex_density_tolerance, smooth_banklines,
+    smooth_main_bankline,
     simplify_if_needed, create_channel_nw_polygon, straighten_channel,
     straighten_polygon, polygon_to_svg, plot_polygon, one_time_step, create_main_channel_banks
 )
@@ -136,6 +137,7 @@ __all__ = [
     
     # Polygon processing
     'smooth_polygon', 'smooth_line', 'vertex_density_tolerance', 'smooth_banklines',
+    'smooth_main_bankline',
     'simplify_if_needed', 'create_channel_nw_polygon', 'plot_polygon', 'straighten_channel',
     'straighten_polygon', 'polygon_to_svg', 'one_time_step', 'create_main_channel_banks',
     

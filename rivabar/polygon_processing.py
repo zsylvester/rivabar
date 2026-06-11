@@ -160,8 +160,9 @@ def extend_line(x, y, ratio):
     input coordinates to extrapolate the line at both ends.
     """
     
-    a1, b1 = getExtrapolatedLine((x[10], y[10]), (x[0], y[0]), ratio) # use the first two points
-    a2, b2 = getExtrapolatedLine((x[-10], y[-10]), (x[-1], y[-1]), ratio) # use the last two points
+    j = max(1, min(10, len(x) // 2)) # anchor index; clamped so short lines work too
+    a1, b1 = getExtrapolatedLine((x[j], y[j]), (x[0], y[0]), ratio) # extrapolate beyond the first point
+    a2, b2 = getExtrapolatedLine((x[-j], y[-j]), (x[-1], y[-1]), ratio) # extrapolate beyond the last point
     x = np.hstack((b1[0], x, b2[0]))
     y = np.hstack((b1[1], y, b2[1]))
     line = LineString(np.vstack((x, y)).T)
@@ -224,6 +225,12 @@ def smooth_polygon(poly, savgol_window=21, remove_count=1):
     """
     x = poly.exterior.xy[0]
     y = poly.exterior.xy[1]
+    # Clamp the filter window to the number of available points (savgol_filter
+    # requires window_length <= len(x) and > polyorder); polygons too small to
+    # smooth are returned unchanged
+    savgol_window = min(savgol_window, len(x) if len(x) % 2 == 1 else len(x) - 1)
+    if savgol_window < 5:
+        return poly
     # Use Savitzky-Golay filter on x and y
     x_sm = savgol_filter(x, savgol_window, 3)
     y_sm = savgol_filter(y, savgol_window, 3)
@@ -266,6 +273,12 @@ def smooth_line(x, y, savgol_window=21, multiplier=1.5): #, spline_ds = 25, spli
     ys : ndarray
         The smoothed y-coordinates.
     """
+    # Clamp the filter window to the number of available points (savgol_filter
+    # requires window_length <= len(x) and > polyorder); lines too short to
+    # smooth are returned unchanged
+    savgol_window = min(savgol_window, len(x) if len(x) % 2 == 1 else len(x) - 1)
+    if savgol_window < 5:
+        return np.asarray(x), np.asarray(y)
     # Use Savitzky-Golay filter on x and y
     x_sm = savgol_filter(x, savgol_window, 3)
     y_sm = savgol_filter(y, savgol_window, 3)
@@ -344,43 +357,63 @@ def smooth_banklines(G_rook, dataset, mndwi, save_smooth_lines=False):
     polys = []
     im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0, mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
     for i in range(2): # deal with the main banklines first - they are more complicated
-        # first need to isolate line that can be / should be smoothed:
-        other_side = im_boundary.buffer(-100).difference(G_rook.nodes()[i]['bank_polygon'])
-        line = other_side.intersection(G_rook.nodes()[i]['bank_polygon'])
-        new_line = []
-        for geom in line.geoms:
-            if type(geom) == LineString:
-                new_line.append(geom)
-        line = linemerge(new_line)
-        if type(line) != LineString:
-            lengths = []
-            for geom in line.geoms:
-                # lengths.append(geom.length)
-                lengths.append(len(geom.coords))
-            line = line.geoms[np.argmax(lengths)]
-        # line = extend_line(line.xy[0], line.xy[1], 10000)
-        # x1, y1 = smooth_line(line.xy[0], line.xy[1], multiplier=0.1)
-        # line = LineString(np.vstack((x1, y1)).T)
-        x1, y1 = smooth_line(line.xy[0], line.xy[1], multiplier=0.1) # smooth line first
-        line = extend_line(x1, y1, 10000) # then do the extension needed to cut the image boundary rectangle
-        geoms = split(im_boundary, line)
-        if len(geoms.geoms) > 1:
-            if geoms.geoms[0].intersection(G_rook.nodes[i]["bank_polygon"]).area > geoms.geoms[1].intersection(G_rook.nodes[i]["bank_polygon"]).area:
-                if save_smooth_lines:
-                    G_rook.nodes()[i]['bank_polygon'] = geoms.geoms[0]
-                polys.append(geoms.geoms[0])
-            else:
-                if save_smooth_lines:
-                    G_rook.nodes()[i]['bank_polygon'] = geoms.geoms[1]
-                polys.append(geoms.geoms[1])
+        smooth_bank_poly = smooth_main_bankline(G_rook.nodes()[i]['bank_polygon'], im_boundary)
+        if smooth_bank_poly is not None:
+            if save_smooth_lines:
+                G_rook.nodes()[i]['bank_polygon'] = smooth_bank_poly
+            polys.append(smooth_bank_poly)
         else:
-            print("Warning: only one polygon found after splitting when trying to smooth banklines")
+            print(f"WARNING: could not smooth the main bankline for bank node {i} "
+                  f"(splitting the image boundary with the smoothed bankline produced a single polygon); "
+                  f"the UNSMOOTHED bank polygon is kept")
     for i in range(2, len(G_rook.nodes)):
         smooth_bank_poly = smooth_polygon(G_rook.nodes()[i]['bank_polygon'])
         if save_smooth_lines:
             G_rook.nodes()[i]['bank_polygon'] = smooth_bank_poly
         polys.append(smooth_bank_poly)
     return polys
+
+
+def smooth_main_bankline(bank_polygon, im_boundary):
+    """
+    Smooth one of the two main bank polygons.
+
+    Isolates the bankline (the part of the polygon boundary away from the
+    image edges), smooths and extends it, and splits the image boundary
+    polygon with it.
+
+    Parameters
+    ----------
+    bank_polygon : shapely.geometry.Polygon
+        The (unsmoothed) main bank polygon (G_rook node 0 or 1).
+    im_boundary : shapely.geometry.Polygon
+        Polygon outlining the image extent.
+
+    Returns
+    -------
+    shapely.geometry.Polygon or None
+        The smoothed bank polygon, or None when the smoothed bankline
+        failed to split the image boundary into two pieces.
+    """
+    # first need to isolate the line that can be / should be smoothed:
+    other_side = im_boundary.buffer(-100).difference(bank_polygon)
+    line = other_side.intersection(bank_polygon)
+    if line.geom_type == 'LineString':
+        new_line = [line]
+    else:
+        new_line = [geom for geom in line.geoms if type(geom) == LineString]
+    line = linemerge(new_line)
+    if type(line) != LineString: # keep the piece with the most vertices
+        lengths = [len(geom.coords) for geom in line.geoms]
+        line = line.geoms[np.argmax(lengths)]
+    x1, y1 = smooth_line(line.xy[0], line.xy[1], multiplier=0.1) # smooth line first
+    line = extend_line(x1, y1, 10000) # then do the extension needed to cut the image boundary rectangle
+    geoms = split(im_boundary, line)
+    if len(geoms.geoms) > 1:
+        if geoms.geoms[0].intersection(bank_polygon).area > geoms.geoms[1].intersection(bank_polygon).area:
+            return geoms.geoms[0]
+        return geoms.geoms[1]
+    return None
 
 
 def simplify_if_needed(geom, simplify_tolerance):

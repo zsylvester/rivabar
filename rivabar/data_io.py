@@ -662,7 +662,12 @@ class MinimalDataset:
             self.crs = crs
         self.transform = transform
         self.shape = shape
-    
+
+    def xy(self, row, col, offset='center'):
+        """Return the (x, y) coordinates of a pixel, like rasterio datasets."""
+        from rasterio.transform import xy as transform_xy
+        return transform_xy(self.transform, row, col, offset=offset)
+
     def __repr__(self):
         return f"MinimalDataset(crs={self.crs}, transform={self.transform}, shape={self.shape})"
 
