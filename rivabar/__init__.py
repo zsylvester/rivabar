@@ -4,9 +4,8 @@ rivabar - A Python package to automatically extract channel centerlines and bank
 
 # Rivabar - River Analysis and Centerline Extraction Package
 
-# Import main function
-from .core import map_river_banks, main
-from .rivabar_legacy import extract_centerline
+# Import main function (extract_centerline is a backward-compatible alias)
+from .core import map_river_banks, main, extract_centerline
 
 # Import River class for object-oriented API
 from .river import River

@@ -870,6 +870,20 @@ def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
     return D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, xs, ys
 
 
+def extract_centerline(*args, **kwargs):
+    """
+    Backward-compatible alias for :func:`map_river_banks`.
+
+    The original implementation (rivabar_legacy.py) was removed; this alias
+    accepts the same parameters and returns the same 11-tuple
+    ``(D_primal, G_rook, G_primal, mndwi, dataset, left_utm_x, right_utm_x,
+    lower_utm_y, upper_utm_y, xs, ys)``. Note that the default for
+    ``remove_smaller_components`` is True here (the legacy default was False).
+    New code should use ``map_river_banks`` or the ``River`` class.
+    """
+    return map_river_banks(*args, **kwargs)
+
+
 def main(fname, dirname, start_x, start_y, end_x, end_y, file_type, **kwargs):
     """Main function to extract centerlines from command line arguments."""
     return map_river_banks(
