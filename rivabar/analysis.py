@@ -8,14 +8,13 @@ import networkx as nx
 from tqdm import tqdm, trange
 from scipy.interpolate import CubicSpline, interp1d
 from scipy.spatial import ConvexHull
-from scipy.spatial.distance import cdist
 from scipy import ndimage
 from shapely.geometry import Point, LineString, MultiLineString, Polygon
 from shapely.ops import split, nearest_points
 from rasterio import features
 from skimage.measure import find_contours
 
-from .utils import resample_and_smooth, find_condition, compute_s_distance
+from .utils import resample_and_smooth, find_condition
 from .geometry_utils import getExtrapolatedLine, find_matching_indices
 from .graph_processing import find_start_node
 
@@ -876,8 +875,7 @@ def filter_outlier_paths(rivers, outlier_threshold=2.0, min_overlap_ratio=0.3,
     # Use the longest path as reference or create a synthetic one
     path_lengths = [len(path) for path in all_paths]
     longest_idx = np.argmax(path_lengths)
-    reference_path = all_paths[longest_idx]
-    
+
     print(f"📐 Using path from river {getattr(valid_rivers[longest_idx], 'scene_id', longest_idx)} as reference")
     
     # Resample all paths to common coordinate system
@@ -956,8 +954,7 @@ def filter_outlier_paths(rivers, outlier_threshold=2.0, min_overlap_ratio=0.3,
     
     # Identify outliers using multiple criteria
     mean_devs = [d['mean_deviation'] for d in deviations]
-    overlap_ratios = [d['overlap_ratio'] for d in deviations]
-    
+
     # Calculate thresholds
     mean_dev_threshold = np.mean(mean_devs) + outlier_threshold * np.std(mean_devs)
     

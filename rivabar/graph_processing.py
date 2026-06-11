@@ -2,16 +2,13 @@
 
 import numpy as np
 import networkx as nx
-import warnings
 from shapely.geometry import LineString, Point, Polygon
 from scipy.spatial import KDTree
 from tqdm import tqdm
-import pandas as pd
-from itertools import combinations, permutations
+from itertools import permutations
 
 from .geometry_utils import (convert_to_utm, find_matching_indices, find_closest_point, 
                            find_longer_segment_coords, extract_coords, angle_between)
-from .utils import find_condition
 
 
 def remove_dead_ends(graph, start_node, end_node):
@@ -545,10 +542,6 @@ def create_directed_multigraph(G_primal, G_rook, xs, ys, primal_start_ind, prima
                         keys = G_primal[s][e][d]['half_widths'].keys()
                         for neighbor in nx.neighbors(G_rook, node):
                             if (node in keys and neighbor in keys) and ((s, e) not in D_edges and (e, s) not in D_edges):
-                                x1 = G_primal.nodes()[s]['geometry'].xy[0][0]
-                                y1 = G_primal.nodes()[s]['geometry'].xy[1][0]
-                                x2 = G_primal.nodes()[e]['geometry'].xy[0][0]
-                                y2 = G_primal.nodes()[e]['geometry'].xy[1][0]
                                 G_edges.append((s, e))
                 # Initialize sums
                 sum_x = 0
@@ -767,18 +760,10 @@ def truncate_graph_by_polygon(D_primal, x_utm, y_utm):
                     new_edges.append((start_node, end_node, d, line,
                                    D_primal_truncated[s][e][d].copy()))
     
-    # 4. Remove nodes inside the polygon
+    # 4. Remove nodes inside the polygon (this also removes incident edges)
     D_primal_truncated.remove_nodes_from(nodes_to_remove)
-    
-    # 5. Remove all edges connected to removed nodes
-    edges_to_remove = []
-    for s, e, d in D_primal_truncated.edges(keys=True):
-        if s in nodes_to_remove or e in nodes_to_remove:
-            edges_to_remove.append((s, e, d))
-    
-    D_primal_truncated.remove_edges_from(edges_to_remove)
-    
-    # 6. Add the new edges representing the truncated segments
+
+    # 5. Add the new edges representing the truncated segments
     for s, e, d, geometry, attrs in new_edges:
         D_primal_truncated.add_edge(s, e, d, **attrs)
         D_primal_truncated[s][e][d]['geometry'] = geometry
@@ -926,10 +911,6 @@ def check_edges_around_islands(D_primal, G_rook):
     D_primal : networkx.MultiDiGraph
         The modified directed multigraph with corrected edge orientations.
     """
-    import numpy as np
-    import networkx as nx
-    from shapely.geometry import LineString
-    
     # Find all source and sink nodes
     sources = [node for node in D_primal.nodes() if D_primal.in_degree(node) == 0]
     sinks = [node for node in D_primal.nodes() if D_primal.out_degree(node) == 0]
@@ -1097,46 +1078,6 @@ def get_rid_of_extra_lines_at_beginning_and_end(G_primal, x1, y1, left_utm_x, up
             G_primal.remove_node(start_ind)
             node = end_ind
     return G_primal, node 
-
-def find_subpath(D_primal, root, depth_limit=10):
-    """
-    Finds the subpath with the largest average width in a directed graph from the root node up to a specified depth limit.
-
-    Parameters
-    ----------
-    D_primal : networkx.DiGraph
-        The directed graph in which to find the subpath.
-    root : node
-        The root node from which to start the search.
-    depth_limit : int, optional
-        The maximum depth to search from the root node (default is 10).
-
-    Returns
-    -------
-    list or bool
-        Returns the subpath with the maximum average width if any paths are found, otherwise returns False.
-    """
-    nodes = nx.single_source_shortest_path_length(D_primal, root, cutoff=depth_limit)
-    leaves = [node for node, depth in nodes.items() if depth == min(depth_limit, list(nodes.values())[-1])]
-    D_primal_small = nx.subgraph(D_primal, nodes)
-    all_paths = []
-    for leaf in leaves:
-        paths = nx.all_simple_edge_paths(D_primal_small, root, leaf)
-        for path in paths:
-            if len(path) > 0:
-                all_paths.append(path)
-    if len(all_paths) > 0:
-        weights = []
-        for path in all_paths:
-            width = 0
-            length = 0
-            for s,e,d in path:
-                width += D_primal[s][e][d]['width']
-                length += D_primal[s][e][d]['mm_len']
-            weights.append((width/len(path)))
-        return all_paths[np.argmax(weights)]
-    else:
-        return False
 
 def traverse_multigraph(G, start_node, subpath_depth=5):
     """

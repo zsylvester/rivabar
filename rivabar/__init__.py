@@ -136,7 +136,7 @@ __all__ = [
     
     # Polygon processing
     'smooth_polygon', 'smooth_line', 'vertex_density_tolerance', 'smooth_banklines',
-    'simplify_if_needed', 'create_channel_nw_polygon', 'straighten_channel',
+    'simplify_if_needed', 'create_channel_nw_polygon', 'plot_polygon', 'straighten_channel',
     'straighten_polygon', 'polygon_to_svg', 'one_time_step', 'create_main_channel_banks',
     
     # Graph processing
@@ -163,6 +163,7 @@ __all__ = [
     
     # Visualization
     'plot_im_and_lines', 'plot_graph_w_colors',
+    'map_graphs_over_time', 'calculate_node_displacement_deviation',
     'plot_graph_mappings', 'plot_deviation_histogram',
     'plot_river_segments', 'plot_centerline_comparison', 'plot_pair',
     'interactive_scatter',

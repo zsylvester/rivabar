@@ -1,10 +1,8 @@
 import numpy as np
 import geopandas as gpd
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString
 import matplotlib.pyplot as plt
-import warnings
 import os
-import datetime
 
 from .core import map_river_banks
 from .analysis import get_channel_widths_along_path, analyze_width_and_wavelength
@@ -135,8 +133,7 @@ class River:
                 
         except Exception as e:
             import traceback
-            import sys
-            
+
             print(f"✗ Error processing {self.fname}: {str(e)}")
             print(f"Error type: {type(e).__name__}")
             print(f"Processing parameters:")
@@ -697,7 +694,7 @@ class River:
         fig, ax = plt.subplots(figsize=figsize)
         
         # Plot MNDWI
-        im = ax.imshow(
+        ax.imshow(
             self._mndwi, 
             extent=[self._left_utm_x, self._right_utm_x, 
                    self._lower_utm_y, self._upper_utm_y],
@@ -955,8 +952,6 @@ class River:
 
     def get_memory_usage(self):
         """Get approximate memory usage of stored data."""
-        import sys
-        
         memory_mb = 0
         if self._mndwi is not None:
             memory_mb += self._mndwi.nbytes / 1024**2
@@ -1229,10 +1224,6 @@ class River:
                             # Create River instance and process
                             print(f"    Processing with rivabar...")
                             
-                            # Filter out batch-specific parameters that shouldn't go to map_river_banks
-                            filtered_kwargs = {k: v for k, v in processing_kwargs.items() 
-                                             if k not in ['skip_scenes']}
-                            
                             river = cls(
                                 fname=os.path.basename(tmp_path),
                                 dirname=os.path.dirname(tmp_path) + '/',
@@ -1241,7 +1232,7 @@ class River:
                                 end_x=end_x,
                                 end_y=end_y,
                                 file_type='water_index',
-                                **filtered_kwargs
+                                **processing_kwargs
                             )
                             
                             # Add metadata
@@ -1398,14 +1389,7 @@ class River:
                     
                     # Create a minimal dataset-like object for CRS info if available
                     if river_data.get('dataset_crs') and river._dataset is None:
-                        # Create a simple object to hold CRS info for to_geopandas()
-                        class MinimalDataset:
-                            def __init__(self, crs_str, transform=None, shape=None):
-                                from rasterio.crs import CRS
-                                self.crs = CRS.from_string(crs_str) if crs_str else None
-                                self.transform = transform
-                                self.shape = shape
-                        
+                        from .data_io import MinimalDataset
                         river._dataset = MinimalDataset(
                             river_data.get('dataset_crs'),
                             river_data.get('dataset_transform'),
@@ -1587,9 +1571,6 @@ class River:
         temp_mndwi = self._mndwi
         self._dataset = None
         self._mndwi = None
-        
-        # Store original file size info for comparison
-        original_memory = self.get_memory_usage()
         
         try:
             # Create results dictionary for saving

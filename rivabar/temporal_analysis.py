@@ -8,8 +8,7 @@ import warnings
 import networkx as nx
 from tqdm import tqdm, trange
 from datetime import datetime
-from shapely.geometry import Polygon, MultiPolygon, Point, GeometryCollection
-from shapely.validation import make_valid
+from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
 from shapely.ops import unary_union
 from pyproj import Transformer
 import ee
@@ -123,173 +122,6 @@ def cluster_polygons(gdf, iou_threshold, max_days=2*365):
     clusters = list(nx.connected_components(G))
     return G, clusters
 
-def find_numbers_between(start, end, decimal_places):
-    """
-    Returns a list of numbers between start and end, rounded to the specified decimal places.
-
-    Parameters
-    ----------
-    start : float
-        The starting number of the range.
-    end : float
-        The ending number of the range.
-    decimal_places : int
-        The number of decimal places to round each number to.
-
-    Returns
-    -------
-    list of float
-        A list of numbers between start and end, inclusive, rounded to the specified decimal places.
-    """
-    step = 10 ** -decimal_places  # Calculate the step size based on decimal places
-    numbers = []
-    current_number = round(start, decimal_places)  # Begin with start rounded to specified places
-    while current_number <= end:
-        numbers.append(current_number)
-        current_number += step  # Increment by the step size
-        current_number = round(current_number, decimal_places)
-    return numbers
-
-def group_edges_to_subpaths(edges):
-    """
-    Groups edges into subpaths in a directed graph.
-
-    Parameters
-    ----------
-    edges : list of tuple
-        A list of tuples where each tuple represents an edge in the format (start_node, end_node, data).
-
-    Returns
-    -------
-    subpaths : list of list of tuple
-        A list of subpaths, where each subpath is a list of edges. Each edge is represented as a tuple (start_node, end_node, data).
-    """
-    G = nx.DiGraph()
-    for s, e, d in edges:
-        G.add_edge(s, e, data=d)
-    subpaths = []
-    for node in G.nodes:
-        # If the node has no incoming edges, it could be a start of a subpath
-        if G.in_degree(node) == 0:
-            for target in G.nodes:
-                # If the target node has no outgoing edges, it could be an end of a subpath
-                if G.out_degree(target) == 0 and nx.has_path(G, node, target):
-                    path = nx.shortest_path(G, node, target)
-                    # Convert node path to edge path with data
-                    edge_path = [(path[i], path[i + 1], G.edges[path[i], path[i + 1]]['data']) for i in range(len(path) - 1)]
-                    subpaths.append(edge_path)
-    return subpaths
-
-def find_matching_subpaths(subpaths1, subpaths2):
-    """
-    Find matching subpaths between two lists of subpaths.
-
-    Parameters
-    ----------
-    subpaths1 : list of list of tuples
-        The first list of subpaths, where each subpath is a list of tuples representing edges.
-    subpaths2 : list of list of tuples
-        The second list of subpaths, where each subpath is a list of tuples representing edges.
-
-    Returns
-    -------
-    list of tuples
-        A list of tuples, where each tuple contains a matching subpath from `subpaths1` and `subpaths2`.
-        A subpath is considered matching if it has the same start and end nodes.
-    """
-    matching_subpaths = []
-    for subpath1 in subpaths1:
-        start1, end1 = subpath1[0][0], subpath1[-1][1]  # Start and end nodes of subpath1
-
-        for subpath2 in subpaths2:
-            start2, end2 = subpath2[0][0], subpath2[-1][1]  # Start and end nodes of subpath2
-
-            if start1 == start2 and end1 == end2:
-                # Found a match
-                matching_subpaths.append((subpath1, subpath2))
-
-    return matching_subpaths
-
-def splice_paths(D_primal, path1, path2):
-    """
-    Splices two paths by replacing segments in the first path with improved segments from the second path based on edge widths.
-
-    Parameters
-    ----------
-    D_primal : dict
-        A dictionary representing the primal graph where keys are node pairs and values are dictionaries containing edge attributes.
-    path1 : list of tuples
-        The first path represented as a list of edges (tuples of nodes).
-    path2 : list of tuples
-        The second path represented as a list of edges (tuples of nodes).
-
-    Returns
-    -------
-    list of tuples
-        The spliced path where segments from path1 have been replaced with corresponding segments from path2 if they have better (higher) widths.
-    """
-    # Find the start and end nodes that are common between the two paths
-    start_node = None
-    end_node = None
-    
-    for edge1 in path1:
-        for edge2 in path2:
-            if edge1[0] == edge2[0]:  # Same start node
-                start_node = edge1[0]
-                break
-        if start_node:
-            break
-    
-    for edge1 in reversed(path1):
-        for edge2 in reversed(path2):
-            if edge1[1] == edge2[1]:  # Same end node
-                end_node = edge1[1]
-                break
-        if end_node:
-            break
-    
-    if not start_node or not end_node:
-        # If no common start or end nodes, return the original path1
-        return path1
-    
-    # Extract the subpaths from start_node to end_node for both paths
-    subpath1 = []
-    subpath2 = []
-    
-    recording1 = False
-    for edge in path1:
-        if edge[0] == start_node:
-            recording1 = True
-        if recording1:
-            subpath1.append(edge)
-        if edge[1] == end_node:
-            break
-    
-    recording2 = False
-    for edge in path2:
-        if edge[0] == start_node:
-            recording2 = True
-        if recording2:
-            subpath2.append(edge)
-        if edge[1] == end_node:
-            break
-    
-    # Calculate the average width for each subpath
-    avg_width1 = np.mean([D_primal[edge[0]][edge[1]][edge[2]]['width'] for edge in subpath1 if 'width' in D_primal[edge[0]][edge[1]][edge[2]]])
-    avg_width2 = np.mean([D_primal[edge[0]][edge[1]][edge[2]]['width'] for edge in subpath2 if 'width' in D_primal[edge[0]][edge[1]][edge[2]]])
-    
-    # If subpath2 has a higher average width, replace subpath1 with subpath2
-    if avg_width2 > avg_width1:
-        # Find the indices of start_node and end_node in path1
-        start_index = next(i for i, edge in enumerate(path1) if edge[0] == start_node)
-        end_index = next(i for i, edge in enumerate(path1) if edge[1] == end_node)
-        
-        # Replace the subpath in path1 with subpath2
-        spliced_path = path1[:start_index] + subpath2 + path1[end_index+1:]
-        return spliced_path
-    else:
-        return path1
-
 def get_ch_and_bar_areas(gdf, xmin, xmax, ymin, ymax):
     """
     Calculate channel and bar areas within a specified area of interest (AOI) over time.
@@ -333,32 +165,8 @@ def get_ch_and_bar_areas(gdf, xmin, xmax, ymin, ymax):
         date = gdf[(gdf['n_days']== n_days) & (gdf['type']==0)].date.dt.year
         bank0 = gdf[(gdf['n_days']== n_days) & (gdf['type']==0)].geometry.values[0]
         bank0 = bank0.intersection(aoi_poly)
-        # inds = []
-        # if type(aoi_poly.difference(bank0)) == Polygon:
-        #     geoms = [aoi_poly.difference(bank0)]
-        # else:
-        #     geoms = aoi_poly.difference(bank0).geoms
-        # count = 0
-        # for geom in geoms:
-        #     if geom.touches(Point([xmin, ymin])) or geom.touches(Point([xmin, ymax])):
-        #         inds.append(count)
-        #     count += 1
-        # for ind in inds:
-        #     bank0 = bank0.union(geoms[ind])
         bank1 = gdf[(gdf['n_days']== n_days) & (gdf['type']==1)].geometry.values[0]
         bank1 = bank1.intersection(aoi_poly)
-        # inds = []
-        # if type(aoi_poly.difference(bank1)) == Polygon:
-        #     geoms = [aoi_poly.difference(bank1)]
-        # else:
-        #     geoms = aoi_poly.difference(bank1).geoms
-        # count = 0
-        # for geom in geoms:
-        #     if geom.touches(Point([xmax, ymin])) or geom.touches(Point([xmax, ymax])):
-        #         inds.append(count)
-        #     count += 1
-        # for ind in inds:
-        #     bank1 = bank1.union(geoms[ind])
         ch_belt = aoi_poly.difference(unary_union([bank0, bank1]))
         bars = []
         for i in gdf.index:
@@ -1373,6 +1181,32 @@ def calculate_node_displacement_deviation(D_primal_t1, D_primal_t2, primal_node_
     return deviations, distances
 
 
+def _estimate_mean_channel_width(rivers, default=500.0):
+    """
+    Estimate the mean channel width (in meters) across processed rivers.
+
+    Returns ``(mean_width, measured)`` where *measured* is False when no
+    river width could be computed and *default* was used instead.
+    """
+    from .analysis import get_channel_widths_along_path
+    widths = []
+    for river in rivers:
+        if not river._is_processed or not river._processing_successful:
+            continue
+        try:
+            path = river.main_path
+            if path is None:
+                continue
+            xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(river._D_primal, path)
+            pixel_size = river._dataset.transform[0]
+            widths.append(np.nanmean(np.array(w) * pixel_size))
+        except Exception:
+            continue
+    if not widths:
+        return default, False
+    return float(np.nanmean(widths)), True
+
+
 def find_common_confluences(rivers, min_scene_fraction=0.5, width_scale_factor=3.0,
                             min_branch_length=None):
     """
@@ -1406,8 +1240,6 @@ def find_common_confluences(rivers, min_scene_fraction=0.5, width_scale_factor=3
         - 'scene_fraction': fraction of scenes
         - 'member_coords': list of (x, y) coordinates from individual scenes
     """
-    from .analysis import get_channel_widths_along_path
-
     # Collect all confluence points with scene indices
     all_points = []  # list of (x, y, river_index)
     valid_rivers = []
@@ -1431,24 +1263,9 @@ def find_common_confluences(rivers, min_scene_fraction=0.5, width_scale_factor=3
     min_scenes = max(1, int(np.ceil(min_scene_fraction * n_valid)))
 
     # Estimate mean channel width across all valid rivers (in meters)
-    widths = []
-    for i in valid_rivers:
-        river = rivers[i]
-        try:
-            path = river.main_path
-            if path is None:
-                continue
-            xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(river._D_primal, path)
-            pixel_size = river._dataset.transform[0]
-            widths.append(np.nanmean(np.array(w) * pixel_size))
-        except Exception:
-            continue
-
-    if not widths:
-        mean_width = 500.0  # fallback
+    mean_width, measured = _estimate_mean_channel_width([rivers[i] for i in valid_rivers])
+    if not measured:
         print(f"Could not estimate channel width; using default clustering distance of {mean_width * width_scale_factor:.0f} m")
-    else:
-        mean_width = float(np.nanmean(widths))
 
     cluster_dist = width_scale_factor * mean_width
     print(f"Mean channel width: {mean_width:.0f} m, clustering distance: {cluster_dist:.0f} m")
@@ -1548,29 +1365,13 @@ def match_river_segments(rivers, common_confluences, max_snapping_distance=None,
     rejected : dict
         Keyed by ``(river_index, segment_index)`` with the reason string.
     """
-    from .analysis import get_channel_widths_along_path
-
     split_points = [c['utm_coords'] for c in common_confluences]
     n_confluences = len(split_points)
     n_segments = n_confluences + 1  # segments between / outside confluences
 
     # Estimate mean channel width for default threshold
     if max_snapping_distance is None:
-        widths = []
-        for river in rivers:
-            if not river._is_processed or not river._processing_successful:
-                continue
-            try:
-                path = river.main_path
-                if path is None:
-                    continue
-                xl, yl, w1l, w2l, w, s = get_channel_widths_along_path(
-                    river._D_primal, path)
-                pixel_size = river._dataset.transform[0]
-                widths.append(np.nanmean(np.array(w) * pixel_size))
-            except Exception:
-                continue
-        mean_width = float(np.nanmean(widths)) if widths else 500.0
+        mean_width, _ = _estimate_mean_channel_width(rivers)
         max_snapping_distance = width_scale_factor * mean_width
         print(f"Max snapping distance: {max_snapping_distance:.0f} m "
               f"({width_scale_factor}x mean width of {mean_width:.0f} m)")

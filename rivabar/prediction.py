@@ -31,6 +31,7 @@ Sylvester, Z., Durkin, P. and Covault, J.A., 2019. High curvatures drive
 """
 
 import numpy as np
+import pandas as pd
 from scipy.optimize import minimize_scalar
 from scipy import stats
 from tqdm import tqdm
@@ -377,14 +378,7 @@ def calibrate_pair(results, pair_idx, Cf_range=(0.001, 0.02),
     # prediction is always computed on the full contiguous arrays: slicing
     # out high-variance regions before the convolution would concatenate
     # spatially disjoint points and distort the upstream-influence kernel.
-    mask = None
-    if use_stable_segments:
-        segment_results = pair_info.get('segment_results', [])
-        if segment_results:
-            # Build mask of stable segment points
-            mask = np.zeros(len(curvature), dtype=bool)
-            for seg in segment_results:
-                mask[seg['start_idx']:seg['end_idx'] + 1] = True
+    mask = _stable_segment_mask(pair_info, len(curvature)) if use_stable_segments else None
 
     # Calibrate; statistics restricted to stable segments via the mask
     cal = calibrate_from_curvature(curvature, observed_mr, s, W,
@@ -406,10 +400,37 @@ def calibrate_pair(results, pair_idx, Cf_range=(0.001, 0.02),
     return cal
 
 
+def _envelope_offsets(px, py, residual_offset):
+    """
+    Offset a predicted centerline by +/- *residual_offset* along the local
+    normal, returning (x_low, y_low, x_high, y_high).
+    """
+    from .utils import compute_s_distance
+    s_pred = compute_s_distance(px, py)
+    dx_ds = np.gradient(px) / np.gradient(s_pred)
+    dy_ds = np.gradient(py) / np.gradient(s_pred)
+    return (px + residual_offset * dy_ds, py - residual_offset * dx_ds,
+            px - residual_offset * dy_ds, py + residual_offset * dx_ds)
+
+
+def _stable_segment_mask(pair_info, n):
+    """
+    Boolean mask of stable-segment points for a pair, or None when the pair
+    has no segment information.
+    """
+    segment_results = pair_info.get('segment_results', [])
+    if not segment_results:
+        return None
+    mask = np.zeros(n, dtype=bool)
+    for seg in segment_results:
+        mask[seg['start_idx']:seg['end_idx'] + 1] = True
+    return mask
+
+
 def calibrate_segment(results, df, pair_class_filter='good',
                       Cf_range=(0.001, 0.02), Omega=-1.0, Gamma=2.5,
                       kl_percentile=75, use_stable_segments=True,
-                      min_time_gap_years=0):
+                      min_time_gap_years=0, pair_indices=None):
     """
     Calibrate the HK model for all qualifying pairs in a segment.
 
@@ -456,17 +477,22 @@ def calibrate_segment(results, df, pair_class_filter='good',
         - 'n_pairs_calibrated': number of pairs used
         - 'W_mean': mean channel width across pairs
     """
-    if isinstance(pair_class_filter, str):
-        pair_class_filter = [pair_class_filter]
+    if pair_indices is not None:
+        # Caller supplies an explicit list of pair indices (e.g. the
+        # training subset in temporal_cross_validate)
+        qualifying = list(pair_indices)
+    else:
+        if isinstance(pair_class_filter, str):
+            pair_class_filter = [pair_class_filter]
 
-    # Find qualifying pairs
-    qualifying = df.index[df['pair_class'].isin(pair_class_filter)].tolist()
+        # Find qualifying pairs
+        qualifying = df.index[df['pair_class'].isin(pair_class_filter)].tolist()
 
-    # Filter by minimum time gap
-    if min_time_gap_years > 0:
-        qualifying = [idx for idx in qualifying
-                      if results['pair_info'][idx]['time_gap_years']
-                      >= min_time_gap_years]
+        # Filter by minimum time gap
+        if min_time_gap_years > 0:
+            qualifying = [idx for idx in qualifying
+                          if results['pair_info'][idx]['time_gap_years']
+                          >= min_time_gap_years]
 
     pair_calibrations = []
     for idx in qualifying:
@@ -545,48 +571,11 @@ def _migrate_forward(x, y, W, D, Cf, kl, Omega, Gamma,
     x, y : ndarray
         Predicted centerline coordinates after total_years.
     """
-    from .utils import resample_and_smooth, compute_s_distance
-    from scipy.signal import savgol_filter
-
-    # Determine time step from CFL condition:
-    # max(|MR|) * dt <= cfl_factor * delta_s
-    # Initial estimate of max MR to set dt
-    s = compute_s_distance(x, y)
-    curv = _curvature_from_xy(x, y)
-    R0 = nominal_migration_rate(curv, W, kl)
-    R1 = predicted_migration_rate(R0, s, D, Cf, Omega, Gamma)
-    max_mr = np.max(np.abs(R1))
-    if max_mr > 0:
-        dt = cfl_factor * delta_s / max_mr
-    else:
-        return x, y
-
-    n_steps = max(int(np.ceil(total_years / dt)), 1)
-    dt = total_years / n_steps
-
-    for _ in range(n_steps):
-        # Compute curvature from current geometry
-        s = compute_s_distance(x, y)
-        curv = _curvature_from_xy(x, y)
-
-        # Predict migration rate
-        R0 = nominal_migration_rate(curv, W, kl)
-        R1 = predicted_migration_rate(R0, s, D, Cf, Omega, Gamma)
-
-        # Compute tangent vectors normalized by arc length
-        dx_ds = np.gradient(x) / np.gradient(s)
-        dy_ds = np.gradient(y) / np.gradient(s)
-
-        # Displace along normal
-        x = x - R1 * dy_ds * dt
-        y = y + R1 * dx_ds * dt
-
-        # Resample to maintain uniform spacing
-        x, y = resample_and_smooth(x, y, delta_s,
-                                   smoothing_factor=0,
-                                   compute_curvature=False)
-
-    return x, y
+    # Constant kl is the special case of the spatially-varying integrator
+    kl_s = np.array([kl, kl], dtype=float)
+    s_kl = np.array([0.0, 1.0])
+    return _migrate_forward_local(x, y, W, D, Cf, kl_s, s_kl, Omega, Gamma,
+                                  total_years, delta_s, cfl_factor)
 
 
 def _migrate_forward_local(x, y, W, D, Cf, kl_s, s_kl, Omega, Gamma,
@@ -720,7 +709,7 @@ def predict_forward_local(river, local_calibration, segment_calibration=None,
         If *segment_calibration* is given and *prediction_years* set:
         - 'predicted_x_low/high', 'predicted_y_low/high': envelope
     """
-    from .utils import get_width_and_curvature, compute_s_distance
+    from .utils import get_width_and_curvature
 
     x, y, s, width, curvature, _ = get_width_and_curvature(
         river, delta_s=delta_s, smoothing_factor=smoothing_factor,
@@ -801,14 +790,9 @@ def predict_forward_local(river, local_calibration, segment_calibration=None,
         # Uncertainty envelope from segment calibration if available
         if segment_calibration is not None:
             residual_std = segment_calibration.get('residual_std', 0.0)
-            residual_offset = residual_std * prediction_years
-            s_pred = compute_s_distance(px, py)
-            dx_ds = np.gradient(px) / np.gradient(s_pred)
-            dy_ds = np.gradient(py) / np.gradient(s_pred)
-            result['predicted_x_low'] = px + residual_offset * dy_ds
-            result['predicted_y_low'] = py - residual_offset * dx_ds
-            result['predicted_x_high'] = px - residual_offset * dy_ds
-            result['predicted_y_high'] = py + residual_offset * dx_ds
+            (result['predicted_x_low'], result['predicted_y_low'],
+             result['predicted_x_high'], result['predicted_y_high']) = \
+                _envelope_offsets(px, py, residual_std * prediction_years)
 
     return result
 
@@ -908,8 +892,6 @@ def predict_forward(river, calibration, path=None, delta_s=50,
     }
 
     if prediction_years is not None:
-        from .utils import compute_s_distance
-
         # Run forward model with median parameters
         px, py = _migrate_forward(
             x.copy(), y.copy(), W, D, Cf, calibration['kl_median'],
@@ -919,15 +901,9 @@ def predict_forward(river, calibration, path=None, delta_s=50,
 
         # Build envelope by offsetting the predicted centerline by
         # +/- residual_std * prediction_years along the local normal
-        residual_offset = residual_std * prediction_years
-        s_pred = compute_s_distance(px, py)
-        dx_ds = np.gradient(px) / np.gradient(s_pred)
-        dy_ds = np.gradient(py) / np.gradient(s_pred)
-
-        result['predicted_x_low'] = px + residual_offset * dy_ds
-        result['predicted_y_low'] = py - residual_offset * dx_ds
-        result['predicted_x_high'] = px - residual_offset * dy_ds
-        result['predicted_y_high'] = py + residual_offset * dx_ds
+        (result['predicted_x_low'], result['predicted_y_low'],
+         result['predicted_x_high'], result['predicted_y_high']) = \
+            _envelope_offsets(px, py, residual_std * prediction_years)
 
     return result
 
@@ -1047,7 +1023,6 @@ def temporal_cross_validate(results, df, pair_class_filter='good',
         - 'local_calibration': dict with 'kl_median', 'kl_25', 'kl_75',
           's_reference' arrays from the training-set local calibration
     """
-    import pandas as pd
 
     if isinstance(pair_class_filter, str):
         pair_class_filter = [pair_class_filter]
@@ -1099,7 +1074,6 @@ def temporal_cross_validate(results, df, pair_class_filter='good',
                          "and date2 >= cutoff.")
 
     if min_prediction_years > 0:
-        import pandas as pd
         cutoff_ts = pd.Timestamp(cutoff)
         min_pred_delta = pd.Timedelta(days=min_prediction_years * 365.25)
         test_indices = [
@@ -1131,41 +1105,13 @@ def temporal_cross_validate(results, df, pair_class_filter='good',
                 f"No training pairs with time gap <= "
                 f"{max_time_gap_years} years.")
 
-    pair_calibrations = []
-    for idx in tqdm(train_indices, desc='Calibrating training pairs'):
-        try:
-            cal = calibrate_pair(results, idx, Cf_range, Omega, Gamma,
-                                 kl_percentile, use_stable_segments)
-            pair_calibrations.append(cal)
-        except Exception as e:
-            print(f"  Training pair {idx}: calibration failed - {e}")
-
-    if not pair_calibrations:
+    calibration = calibrate_segment(results, df, Cf_range=Cf_range,
+                                    Omega=Omega, Gamma=Gamma,
+                                    kl_percentile=kl_percentile,
+                                    use_stable_segments=use_stable_segments,
+                                    pair_indices=train_indices)
+    if calibration['n_pairs_calibrated'] == 0:
         raise ValueError("All training pair calibrations failed")
-
-    Cf_values = np.array([c['Cf'] for c in pair_calibrations])
-    kl_values = np.array([c['kl'] for c in pair_calibrations])
-    r_values = np.array([c['r_predicted'] for c in pair_calibrations])
-    W_values = np.array([c['W'] for c in pair_calibrations])
-    residual_stds = np.array([c['residual_std'] for c in pair_calibrations])
-
-    calibration = {
-        'pair_calibrations': pair_calibrations,
-        'D': pair_calibrations[0]['D'],
-        'Cf_median': np.median(Cf_values),
-        'Cf_values': Cf_values,
-        'kl_median': np.median(kl_values),
-        'kl_25': np.percentile(kl_values, 25),
-        'kl_75': np.percentile(kl_values, 75),
-        'kl_values': kl_values,
-        'r_predicted_median': np.median(r_values),
-        'r_predicted_values': r_values,
-        'n_pairs_calibrated': len(pair_calibrations),
-        'W_mean': np.mean(W_values),
-        'Omega': Omega,
-        'Gamma': Gamma,
-        'residual_std': np.median(residual_stds),
-    }
 
     # --- Local kl training (optional) ---
     local_cal_data = None
@@ -1268,11 +1214,8 @@ def temporal_cross_validate(results, df, pair_class_filter='good',
                                       Omega, Gamma)
 
         # Evaluate on stable segments only if available
-        segment_results = pi.get('segment_results', [])
-        if use_stable_segments and segment_results:
-            mask = np.zeros(len(curvature), dtype=bool)
-            for seg in segment_results:
-                mask[seg['start_idx']:seg['end_idx'] + 1] = True
+        mask = _stable_segment_mask(pi, len(curvature)) if use_stable_segments else None
+        if mask is not None:
             R1_eval = R1[mask]
             obs_eval = observed_mr[mask]
         else:
@@ -1357,10 +1300,8 @@ def temporal_cross_validate(results, df, pair_class_filter='good',
                 # migration (both from time-1), restricted to stable
                 # segments when requested
                 both_valid = fwd_valid & ~np.isnan(distances)
-                if use_stable_segments and segment_results:
-                    stable_mask = np.zeros(len(curvature), dtype=bool)
-                    for seg in segment_results:
-                        stable_mask[seg['start_idx']:seg['end_idx'] + 1] = True
+                stable_mask = _stable_segment_mask(pi, len(curvature)) if use_stable_segments else None
+                if stable_mask is not None:
                     both_valid = both_valid & stable_mask
                 if np.sum(both_valid) > 2:
                     fwd_mr = fwd_distances[both_valid] / time_gap_years
@@ -1477,14 +1418,11 @@ def detect_cutoff_risk(river, path=None, neck_width_threshold=2.0,
         - 'risk_level': 'high', 'moderate', or 'low'
     """
     from .utils import get_width_and_curvature
-    from scipy.spatial import cKDTree
 
     x, y, s, width, curvature, _ = get_width_and_curvature(
         river, delta_s=delta_s, smoothing_factor=smoothing_factor,
         path=path, pixel_size=pixel_size)
 
-    n = len(x)
-    coords = np.column_stack([x, y])
     W_mean = np.mean(width)
 
     # Estimate wavelength as 2 * pi * W_mean * some factor
@@ -1495,9 +1433,6 @@ def detect_cutoff_risk(river, path=None, neck_width_threshold=2.0,
     # Find curvature extrema (bend apexes)
     from scipy.signal import argrelextrema
     maxima = argrelextrema(np.abs(curvature), np.greater, order=5)[0]
-
-    # Build k-d tree for fast nearest-neighbor queries
-    tree = cKDTree(coords)
 
     risks = []
     for apex_idx in maxima:
@@ -1556,7 +1491,6 @@ def track_parameter_stability(pair_calibrations):
         - 'kl_trend': dict with 'rho' (Spearman), 'p_value'
         - 'Cf_trend': dict with 'rho', 'p_value'
     """
-    import pandas as pd
 
     records = []
     for cal in pair_calibrations:
@@ -1800,13 +1734,7 @@ def calibrate_pair_local(results, pair_idx, use_stable_segments=True,
     # The arrays passed to calibrate_local_kl are always the full contiguous
     # ones: slicing out high-variance regions before the convolution would
     # concatenate spatially disjoint points and distort the kernel.
-    mask = None
-    if use_stable_segments:
-        segment_results = pair_info.get('segment_results', [])
-        if segment_results:
-            mask = np.zeros(len(curvature), dtype=bool)
-            for seg in segment_results:
-                mask[seg['start_idx']:seg['end_idx'] + 1] = True
+    mask = _stable_segment_mask(pair_info, len(curvature)) if use_stable_segments else None
 
     cal = calibrate_local_kl(curvature, observed_mr, s, W,
                              mask=mask, **kwargs)
@@ -1984,7 +1912,6 @@ def calibrate_segment_local(results, df, pair_class_filter='good',
         - 'kl_local_series': list of dicts, one per time centre, each
           with 'kl_median', 'kl_25', 'kl_75', 'n_pairs', 'pair_indices'
     """
-    import pandas as pd
     from .utils import get_width_and_curvature
 
     if isinstance(pair_class_filter, str):

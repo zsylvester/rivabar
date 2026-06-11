@@ -1,7 +1,7 @@
 import numpy as np
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
-from shapely.geometry import Point, Polygon, LineString, MultiLineString
+from shapely.geometry import LineString
 from sklearn.neighbors import KDTree
 
 
@@ -360,8 +360,6 @@ def find_longer_segment_coords(polygon, i1, i2, xs, ys):
     
     segment1_coords = points[i1:i2 + 1]
     segment2_coords = points[i2:] + points[:i1 + 1]
-    
-    print(len(segment1_coords), len(segment2_coords))
     
     # Handle cases where segments have only 1 point
     if len(segment1_coords) == 1 and len(segment2_coords) == 1:

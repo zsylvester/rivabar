@@ -8,18 +8,14 @@ from rasterio.plot import adjust_band
 from rasterio import features
 from tqdm import tqdm
 from skimage.morphology import remove_small_holes
-from skimage.measure import label, regionprops_table, find_contours
+from skimage.measure import label, regionprops_table
 import geopandas
-import pickle
-from datetime import datetime
-from scipy import ndimage
-from shapely.geometry import Polygon, MultiPolygon, LineString, Point, GeometryCollection
-from shapely.ops import unary_union, split
+from shapely.geometry import Polygon, MultiPolygon
+from shapely.ops import unary_union
 from rasterio.enums import Resampling
 
 from .utils import convert_to_uint8, normalized_difference
 from .polygon_processing import create_channel_nw_polygon
-from .geometry_utils import getExtrapolatedLine
 
 
 def process_band(dirname, fname, band_numbers):
@@ -220,9 +216,6 @@ def create_mndwi(dirname, fname, file_type, water_index_type='mndwi', mndwi_thre
                 upper_utm_y = src.transform[5]
                 delta_x = src.transform[0]
                 delta_y = src.transform[4]
-                transform = src.transform
-                crs = src.crs
-                meta = src.meta.copy()
             
             # Re-open the dataset to keep it available for later use
             dataset = rasterio.open(file_path)
@@ -530,13 +523,6 @@ def write_shapefiles_and_graphs(G_rook, D_primal, dataset, dirname, rivername, c
     node_df.to_file(dirname + rivername + "_node_df.shp")
     edge_df.to_file(dirname + rivername + "_edge_df.shp")
 
-    # with open(dirname + rivername + "_G_rook.pickle", "wb") as f:
-    #     pickle.dump(G_rook, f)
-    # with open(dirname + rivername +"_D_primal.pickle", "wb") as f:
-    #     pickle.dump(D_primal, f)
-    # with open(dirname + rivername +"_G_primal.pickle", "wb") as f:
-    #     pickle.dump(D_primal, f)
-
 def merge_and_plot_channel_polygons(fnames):
     """
     Merges multiple channel polygons from shapefiles and plots the resulting polygon.
@@ -572,104 +558,6 @@ def merge_and_plot_channel_polygons(fnames):
             plt.fill(interior.xy[0], interior.xy[1], 'w')
     plt.axis('equal')
     return big_poly
-
-def get_channel_mouth_polygon(mndwi, dataset, points):
-    """
-    Create a polygon that defines the coastline when multiple channels reach the sea/lake (e.g., in a delta).
-    It uses a line drawn roughly parallel to the coastline (defined by 'points') to create the polygon.
-
-    Parameters
-    ----------
-    mndwi : numpy.ndarray
-        A 2D array representing the Modified Normalized Difference Water Index (MNDWI).
-    dataset : rasterio.io.DatasetReader
-        A rasterio dataset object representing the image.
-    points : list
-        A list of points defining a line that runs roughly parallel to the coastline.
-
-    Returns
-    -------
-    x_utm : list
-        The x-coordinates of the vertices of the channel mouth polygon in UTM coordinates.
-    y_utm : list
-        The y-coordinates of the vertices of the channel mouth polygon in UTM coordinates.
-    ch_map : numpy.ndarray
-        A 2D array representing the 'channel' map - in this case, it is a map of the distance of the line from the coastline.
-
-    Example
-    -------
-    points = plt.ginput(-1)  # create a line that runs roughly parallel to the coastline
-    x_utm, y_utm = get_channel_mouth_polygon(mndwi, dataset, points)  # use this function to create the channel mouth polygon
-    """
-    a1, b1 = getExtrapolatedLine((points[1][0], points[1][1]), (points[0][0], points[0][1]), 2000)  # use the first two points
-    a2, b2 = getExtrapolatedLine((points[-2][0], points[-2][1]), (points[-1][0], points[-1][1]), 2000)  # use the last two points
-    line = LineString(np.vstack(((b1[0], b1[1]), points, (b2[0], b2[1]))))
-    poly = line.buffer(1)
-    tile_size = 5000  # this should depend on the mean channel width (in pixels)
-    row1, col1 = dataset.index(poly.bounds[0], poly.bounds[1])
-    row2, col2 = dataset.index(poly.bounds[2], poly.bounds[3])
-    rst_arr = np.zeros(np.shape(mndwi), dtype='uint32')
-    shapes = ((geom, value) for geom, value in zip([poly], [1]))
-    rasterized_poly = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)[row2:row1, col1:col2]
-    mndwi_small = mndwi[row2:row1, col1:col2].copy()
-
-    im_boundary = Polygon([dataset.xy(0, 0), dataset.xy(0, mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
-    geoms = split(im_boundary, line)
-    areas = [geom.area for geom in geoms.geoms]
-    corner_poly = geoms.geoms[np.argmin(areas)]
-    rst_arr = np.zeros(np.shape(mndwi))
-    shapes = ((geom, value) for geom, value in zip([corner_poly], [1]))
-    rasterized_corner = features.rasterize(shapes=shapes, fill=0, out=rst_arr, transform=dataset.transform)[row2:row1, col1:col2]
-    mndwi_small[rasterized_corner == 1] = 1
-
-    mndwi_small_dist = ndimage.distance_transform_edt(mndwi_small)
-
-    ch_map = np.zeros(np.shape(mndwi_small))
-    ch_map[rasterized_corner == 1] = 1
-    row = np.where(rasterized_poly)[0]
-    col = np.where(rasterized_poly)[1]
-    for i in tqdm(range(len(row))):
-        if col[i] < mndwi_small.shape[1] and row[i] < mndwi_small.shape[0]:
-            w = mndwi_small_dist[row[i], col[i]]  # distance to closest channel bank at current location
-            if w <= 5000:
-                pad = int(w) + 10
-                tile = np.ones((pad * 2, pad * 2))
-                tile[pad, pad] = 0
-                tile = ndimage.distance_transform_edt(tile)
-                tile[tile >= w] = 0  # needed to avoid issues with narrow channels
-                tile[tile > 0] = 1
-                r1 = max(0, row[i] - pad)
-                r2 = min(row[i] + pad, mndwi_small.shape[0])
-                c1 = max(0, col[i] - pad)
-                c2 = min(col[i] + pad, mndwi_small.shape[1])
-                tr1 = max(0, pad - row[i])
-                tr2 = min(2 * pad, pad + mndwi_small.shape[0] - row[i])
-                tc1 = max(0, pad - col[i])
-                tc2 = min(2 * pad, pad + mndwi_small.shape[1] - col[i])
-                ch_map[r1:r2, c1:c2] = np.maximum(tile[tr1:tr2, tc1:tc2], ch_map[r1:r2, c1:c2])
-    contours = find_contours(ch_map, 0.5)
-    contour_lengths = [len(contour) for contour in contours]
-    if contour_lengths:
-        ind = np.argmax(np.array(contour_lengths))
-        x = contours[ind][:, 1]
-        y = contours[ind][:, 0]
-        x_utm = dataset.xy(row2 + np.array(y), col1 + np.array(x))[0]
-        y_utm = dataset.xy(row2 + np.array(y), col1 + np.array(x))[1]
-        # extend line so that it intersects the image boundary:
-        a1, b1 = getExtrapolatedLine((x_utm[1], y_utm[1]), (x_utm[0], y_utm[0]), 20)  # use the first two points
-        a2, b2 = getExtrapolatedLine((x_utm[-2], y_utm[-2]), (x_utm[-1], y_utm[-1]), 20)  # use the last two points
-        xcoords = np.hstack((b1[0], x_utm, b2[0]))
-        ycoords = np.hstack((b1[1], y_utm, b2[1]))
-        line = LineString(np.vstack((xcoords, ycoords)).T)
-        polys = split(im_boundary, line)
-        areas = [geom.area for geom in polys.geoms]
-        ch_mouth_poly = polys.geoms[np.argmin(areas)]
-        x_utm = ch_mouth_poly.exterior.xy[0]
-        y_utm = ch_mouth_poly.exterior.xy[1]
-    else:
-        x_utm = []
-        y_utm = []
-    return x_utm, y_utm, ch_map 
 
 def save_planetscope_river_result(river, source_files, save_dir='planetscope_results', 
                                 scene_id=None, cloud_cover=None, **extra_metadata):
@@ -827,10 +715,8 @@ def create_water_mask_from_mapping(G_rook, dataset, output_path=None,
     ...                                                output_path='water_mask.tif')
     """
     from rasterio.features import rasterize
-    from shapely.geometry import Polygon, MultiPolygon, box
-    from shapely.ops import unary_union
-    import numpy as np
-    
+    from shapely.geometry import box
+
     # Get raster dimensions and transform from dataset
     if hasattr(dataset, 'shape'):
         if isinstance(dataset.shape, tuple) and len(dataset.shape) >= 2:

@@ -14,7 +14,6 @@ from scipy.optimize import minimize_scalar
 from scipy import stats, ndimage
 import pandas as pd
 from tqdm import trange
-from librosa.sequence import dtw
 from matplotlib.colors import Normalize
 
 def convert_to_uint8(channel):
@@ -722,74 +721,11 @@ def visualize_dtw_correlations(x1, y1, x2, y2, p, q, ax=None,
     ax.plot(x2, y2, color=centerline_colors[1], linewidth=2, alpha=0.8, 
         label=f'Centerline 2 ({len(x2)} points)', marker='s', markersize=3, zorder=3)
      
-    # Compute signed distances and average by x1 point index
-    # Create arrays to store distances for each x1 point
-    distances_by_x1_point = [[] for _ in range(len(x1))]
-    
-    for i in range(len(p)):
-        # Get corresponding point indices
-        p_idx = p[i]
-        q_idx = q[i]
-        
-        # Check bounds
-        if p_idx < len(x1) and q_idx < len(x2):
-            # Get coordinates of corresponding points
-            x1_point, y1_point = x1[p_idx], y1[p_idx]
-            x2_point, y2_point = x2[q_idx], y2[q_idx]
-            
-            # Compute signed distance based on position relative to centerline 1
-            # Need to determine the downstream direction at this point
-            
-            # Get tangent vector at current point (downstream direction)
-            if p_idx == 0:
-                # Use forward difference for first point
-                if len(x1) > 1:
-                    tx = x1[p_idx + 1] - x1[p_idx]
-                    ty = y1[p_idx + 1] - y1[p_idx]
-                else:
-                    tx, ty = 1.0, 0.0  # fallback
-            elif p_idx == len(x1) - 1:
-                # Use backward difference for last point
-                tx = x1[p_idx] - x1[p_idx - 1]
-                ty = y1[p_idx] - y1[p_idx - 1]
-            else:
-                # Use central difference for interior points
-                tx = x1[p_idx + 1] - x1[p_idx - 1]
-                ty = y1[p_idx + 1] - y1[p_idx - 1]
-            
-            # Normalize tangent vector
-            t_mag = np.sqrt(tx**2 + ty**2)
-            if t_mag > 0:
-                tx /= t_mag
-                ty /= t_mag
-            else:
-                tx, ty = 1.0, 0.0  # fallback for degenerate case
-            
-            # Compute normal vector (perpendicular to tangent, pointing left)
-            # For a tangent vector (tx, ty), the left normal is (-ty, tx)
-            nx = -ty
-            ny = tx
-            
-            # Vector from centerline 1 point to centerline 2 point
-            dx = x2_point - x1_point
-            dy = y2_point - y1_point
-            
-            # Compute signed distance using dot product with normal vector
-            # Positive when point is to the left of centerline 1 (looking downstream)
-            signed_distance = dx * nx + dy * ny
-            
-            # Add to the list for this x1 point
-            distances_by_x1_point[p_idx].append(signed_distance)
-    
-    # Average distances for each x1 point (NaN if no correspondences)
-    distances = np.full(len(x1), np.nan)
-    valid_correspondences = []
-    
-    for i in range(len(x1)):
-        if len(distances_by_x1_point[i]) > 0:
-            distances[i] = np.mean(distances_by_x1_point[i])
-            valid_correspondences.append(i)
-    
+    # Compute signed distances averaged by x1 point index
+    distances, valid_mask = compute_migration_distances(x1, y1, x2, y2, p, q)
+    valid_correspondences = list(np.where(valid_mask)[0])
+
+
     # Determine which connections to show for visualization
     # We need to go back to the original p, q indices for drawing connections
     if show_all_connections:
@@ -1223,10 +1159,132 @@ def compute_migration_distances(x1, y1, x2, y2, p, q):
     
     # Create mask for valid (non-NaN) distances
     valid_mask = ~np.isnan(distances)
-    
+
     return distances, valid_mask
 
-def analyze_river_pairs_filtered(rivers, delta_s=100, smoothing_factor=1e6, 
+def _analyze_pair_core(info1, info2, time_gap_days, time_gap_years,
+                       variance_threshold, min_segment_length):
+    """
+    Shared per-pair DTW migration analysis used by
+    :func:`analyze_river_pairs_filtered` and :func:`analyze_segment_group`.
+
+    Trims the two centerlines to their common extent, runs centerline DTW,
+    computes smoothed signed migration distances, detects high-variance
+    segments, runs curvature-vs-migration-rate DTW on the stable segments,
+    and assembles the per-pair bookkeeping.
+
+    Parameters
+    ----------
+    info1, info2 : dict
+        Pre-computed river info dicts with keys 'x', 'y', 's', 'width',
+        'curvature', 'original_index', 'date', 'year'.
+    time_gap_days : int
+        Time gap between the two scenes in days.
+    time_gap_years : float
+        Absolute time gap in years.
+    variance_threshold : float
+        Threshold for high-variance segment detection.
+    min_segment_length : int
+        Minimum stable-segment length for DTW.
+
+    Returns
+    -------
+    dict
+        Keys: 'cost' (combined DTW cost or NaN), 'lags' (list of lag values),
+        'curvature', 'distances', 's' (arrays for the first river),
+        'centerline_coords' (dict of trimmed x1/y1/x2/y2), and 'pair_info'
+        (the full metadata dict).
+    """
+    x1, y1 = info1['x'], info1['y']
+    x2, y2 = info2['x'], info2['y']
+    s1, s2 = info1['s'], info2['s']
+    width1, curvature1 = info1['width'], info1['curvature']
+    width2 = info2['width']
+
+    # Trim centerlines to common spatial extent
+    sl1, sl2 = _common_extent_slices(x1, y1, x2, y2)
+    x1, y1, s1 = x1[sl1], y1[sl1], s1[sl1]
+    width1, curvature1 = width1[sl1], curvature1[sl1]
+    x2, y2, s2, width2 = x2[sl2], y2[sl2], s2[sl2], width2[sl2]
+
+    # DTW correlation between centerlines and signed migration distances
+    p, q, cost = correlate_curves(x1, x2, y1, y2)
+    distances, valid_mask = compute_migration_distances(x1, y1, x2, y2, p, q)
+    distances = medfilt(savgol_filter(distances, 11, 3), kernel_size=5)
+
+    # Detect high-variance segments in migration distances
+    high_variance_segments, var_profile, var_smooth = detect_high_variance_segments(
+        distances, window_size=50, variance_threshold=variance_threshold)
+
+    # Run curvature vs migration rate DTW on stable segments
+    W = np.mean(width1)
+    segment_results, combined_cost = run_dtw_by_stable_segments(
+        distances, curvature1, s1, high_variance_segments,
+        time_gap_years, W, min_segment_length=min_segment_length)
+
+    if segment_results and combined_cost > 0:
+        pair_cost = combined_cost
+        n_stable_segments = len(segment_results)
+        total_stable_length = sum(seg['length'] for seg in segment_results)
+    else:
+        pair_cost = np.nan
+        n_stable_segments = 0
+        total_stable_length = 0
+        segment_results = []
+
+    # Build warping-path lags from stable segments (global indices)
+    p1_combined, q1_combined, pair_lags = [], [], []
+    for seg_result in segment_results:
+        seg_wp = seg_result['warping_path']
+        seg_start = seg_result['start_idx']
+        for k in range(len(seg_wp)):
+            gp = seg_start + seg_wp[k, 0]
+            gq = seg_start + seg_wp[k, 1]
+            p1_combined.append(gp)
+            q1_combined.append(gq)
+            if gp < len(s1) and gq < len(s1):
+                pair_lags.append(s1[gp] - s1[gq])
+    p1 = np.array(p1_combined) if p1_combined else np.array([], dtype=int)
+    q1 = np.array(q1_combined) if q1_combined else np.array([], dtype=int)
+
+    pair_info_entry = {
+        'river1_index': info1['original_index'],
+        'river2_index': info2['original_index'],
+        'date1': info1['date'],
+        'date2': info2['date'],
+        'year1': info1['year'],
+        'year2': info2['year'],
+        'time_gap_days': time_gap_days,
+        'time_gap_years': time_gap_years,
+        's1': s1, 's2': s2,
+        'width1': width1,
+        'width2': width2,
+        'dtw_cost': combined_cost,
+        'n_correspondences': len(p),
+        'n_valid_distances': np.sum(valid_mask),
+        'p_centerline': p, 'q_centerline': q,
+        'p_curv_mr': p1, 'q_curv_mr': q1,
+        'high_variance_segments': high_variance_segments,
+        'n_high_variance_segments': len(high_variance_segments),
+        'n_stable_segments': n_stable_segments,
+        'total_stable_length': total_stable_length,
+        'stable_data_ratio': (total_stable_length / len(distances)
+                              if len(distances) > 0 else 0),
+        'segment_results': segment_results
+    }
+
+    return {
+        'cost': pair_cost,
+        'lags': pair_lags if pair_lags else [0.0],
+        'curvature': curvature1.copy(),
+        'distances': distances.copy(),
+        's': s1.copy(),
+        'centerline_coords': {'x1': x1.copy(), 'y1': y1.copy(),
+                              'x2': x2.copy(), 'y2': y2.copy()},
+        'pair_info': pair_info_entry,
+    }
+
+def analyze_river_pairs_filtered(rivers, delta_s=100, smoothing_factor=1e6,
                                 width_method='nearest_neighbor', savgol_factor=21,
                                 min_width_m=100, allowed_months=[5,6,7,8], 
                                 min_time_gap_days=365, max_time_gap_years=5,
@@ -1356,9 +1414,7 @@ def analyze_river_pairs_filtered(rivers, delta_s=100, smoothing_factor=1e6,
     for i in trange(len(filtered_rivers)):
         for j in range(i + 1, len(filtered_rivers)):
             n_total_pairs += 1
-            
-            river1 = filtered_rivers[i]
-            river2 = filtered_rivers[j]
+
             info1 = filter_info[i]
             info2 = filter_info[j]
             
@@ -1375,118 +1431,23 @@ def analyze_river_pairs_filtered(rivers, delta_s=100, smoothing_factor=1e6,
                 continue
             
             try:
-                # Extract pre-computed data
-                x1, y1, width1, curvature1 = info1['x'], info1['y'], info1['width'], info1['curvature']
-                x2, y2 = info2['x'], info2['y']
-                s1 = info1['s']
-                s2 = info2['s']
-                width2 = info2['width']
+                pair = _analyze_pair_core(info1, info2, time_gap_days,
+                                          time_gap_years, variance_threshold,
+                                          min_segment_length)
 
-                # Trim centerlines to common spatial extent
-                sl1, sl2 = _common_extent_slices(x1, y1, x2, y2)
-                x1, y1, s1 = x1[sl1], y1[sl1], s1[sl1]
-                width1, curvature1 = width1[sl1], curvature1[sl1]
-                x2, y2, s2, width2 = x2[sl2], y2[sl2], s2[sl2], width2[sl2]
-
-                # Use pre-computed time gap
+                # Append all parallel lists together so a failed pair can't
+                # leave them desynchronized
+                costs.append(pair['cost'])
                 time_gaps.append(time_gap_days)
+                lags.append(pair['lags'])
+                curvatures.append(pair['curvature'])
+                migration_distances.append(pair['distances'])
+                along_channel_distances.append(pair['s'])
+                centerline_coords.append(pair['centerline_coords'])
+                pair_info.append(pair['pair_info'])
 
-                # DTW correlation between centerlines
-                p, q, cost = correlate_curves(x1, x2, y1, y2)
-                distances, valid_mask = compute_migration_distances(x1, y1, x2, y2, p, q)
-                distances = medfilt(savgol_filter(distances, 11, 3), kernel_size=5)
-                
-                # Detect high-variance segments in migration distances
-                high_variance_segments, var_profile, var_smooth = detect_high_variance_segments(
-                    distances, window_size=50, variance_threshold=variance_threshold
-                )
-                
-                # Run DTW analysis on stable segments
-                W = np.mean(width1)  # Mean width in meters
-                segment_results, combined_cost = run_dtw_by_stable_segments(
-                    distances, curvature1, s1, high_variance_segments,
-                    time_gap_years, W, min_segment_length=min_segment_length
-                )
-
-                if segment_results and combined_cost > 0:
-                    costs.append(combined_cost)
-                    n_stable_segments = len(segment_results)
-                    total_stable_length = sum([seg['length'] for seg in segment_results])
-                else:
-                    costs.append(np.nan)
-                    n_stable_segments = 0
-                    total_stable_length = 0
-                    segment_results = []
-
-                # Extract lag information from stable segments
-                pair_lags = []
-                p1_combined = []
-                q1_combined = []
-
-                for seg_result in segment_results:
-                    seg_wp = seg_result['warping_path']
-                    seg_start = seg_result['start_idx']
-
-                    # Convert segment-local indices to global indices
-                    for k in range(len(seg_wp)):
-                        global_p1 = seg_start + seg_wp[k, 0]
-                        global_q1 = seg_start + seg_wp[k, 1]
-                        p1_combined.append(global_p1)
-                        q1_combined.append(global_q1)
-
-                        # Calculate lag for this point
-                        if global_p1 < len(s1) and global_q1 < len(s1):
-                            lag = s1[global_p1] - s1[global_q1]
-                            pair_lags.append(lag)
-
-                p1 = np.array(p1_combined) if p1_combined else np.array([], dtype=int)
-                q1 = np.array(q1_combined) if q1_combined else np.array([], dtype=int)
-                lags.append(pair_lags if pair_lags else [0.0])
-                
-                # Store curvature and migration data
-                curvatures.append(curvature1.copy())  # Store curvature of first river
-                migration_distances.append(distances.copy())  # Store migration distances
-                along_channel_distances.append(s1.copy())  # Store along-channel distance of first river
-                
-                # Store centerline coordinates used in DTW analysis
-                centerline_coords.append({
-                    'x1': x1.copy(),
-                    'y1': y1.copy(), 
-                    'x2': x2.copy(),
-                    'y2': y2.copy()
-                })
-                
-                # Store pair metadata with high-variance segment information
-                pair_info.append({
-                    'river1_index': info1['original_index'],
-                    'river2_index': info2['original_index'],
-                    'date1': info1['date'],
-                    'date2': info2['date'],
-                    'year1': info1['year'],
-                    'year2': info2['year'],
-                    'time_gap_days': time_gap_days,
-                    'time_gap_years': time_gap_years,
-                    's1': s1,
-                    's2': s2,
-                    'width1': width1,
-                    'width2': width2,
-                    'dtw_cost': combined_cost,
-                    'n_correspondences': len(p),
-                    'n_valid_distances': np.sum(valid_mask),
-                    'p_centerline': p,
-                    'q_centerline': q,
-                    'p_curv_mr': p1,
-                    'q_curv_mr': q1,
-                    'high_variance_segments': high_variance_segments,
-                    'n_high_variance_segments': len(high_variance_segments),
-                    'n_stable_segments': n_stable_segments,
-                    'total_stable_length': total_stable_length,
-                    'stable_data_ratio': total_stable_length / len(distances) if len(distances) > 0 else 0,
-                    'segment_results': segment_results
-                })
-                
                 n_valid_pairs += 1
-                
+
             except Exception as e:
                 print(f"Warning: Failed to analyze pair {i}-{j}: {e}")
                 continue
@@ -1586,7 +1547,6 @@ def analyze_segment_group(segment_group, delta_s=100, smoothing_factor=1e6,
     results : dict
         Same structure as :func:`analyze_river_pairs_filtered`.
     """
-    import pandas as pd
 
     rivers = segment_group['rivers']
     paths = segment_group['paths']
@@ -1613,8 +1573,8 @@ def analyze_segment_group(segment_group, delta_s=100, smoothing_factor=1e6,
                 width_method=width_method, curvature_smoothing=True,
                 savgol_factor=savgol_factor, path=path, pixel_size=ps)
 
-            mean_width_m = np.mean(width)
-            if mean_width_m < min_width_m:
+            mean_width_m = np.nanmean(width)
+            if not (mean_width_m >= min_width_m):  # also excludes NaN
                 continue
 
             filtered_rivers.append(river)
@@ -1660,100 +1620,18 @@ def analyze_segment_group(segment_group, delta_s=100, smoothing_factor=1e6,
                 continue
 
             try:
-                x1, y1 = info1['x'], info1['y']
-                x2, y2 = info2['x'], info2['y']
-                s1, s2 = info1['s'], info2['s']
-                width1 = info1['width']
-                curvature1 = info1['curvature']
-                width2 = info2['width']
+                pair = _analyze_pair_core(info1, info2, time_gap_days,
+                                          time_gap_years, variance_threshold,
+                                          min_segment_length)
 
-                # Trim centerlines to common spatial extent
-                sl1, sl2 = _common_extent_slices(x1, y1, x2, y2)
-                x1, y1, s1 = x1[sl1], y1[sl1], s1[sl1]
-                width1, curvature1 = width1[sl1], curvature1[sl1]
-                x2, y2, s2, width2 = x2[sl2], y2[sl2], s2[sl2], width2[sl2]
-
-                p, q, cost = correlate_curves(x1, x2, y1, y2)
-                distances, valid_mask = compute_migration_distances(
-                    x1, y1, x2, y2, p, q)
-                distances = medfilt(savgol_filter(distances, 11, 3),
-                                    kernel_size=5)
-
-                high_variance_segments, var_profile, var_smooth = \
-                    detect_high_variance_segments(
-                        distances, window_size=50,
-                        variance_threshold=variance_threshold)
-
-                W = np.mean(width1)
-                segment_results, combined_cost = run_dtw_by_stable_segments(
-                    distances, curvature1, s1, high_variance_segments,
-                    time_gap_years, W,
-                    min_segment_length=min_segment_length)
-
-                if segment_results and combined_cost > 0:
-                    costs.append(combined_cost)
-                    n_stable_segments = len(segment_results)
-                    total_stable_length = sum(
-                        seg['length'] for seg in segment_results)
-                else:
-                    costs.append(np.nan)
-                    n_stable_segments = 0
-                    total_stable_length = 0
-                    segment_results = []
-
+                costs.append(pair['cost'])
                 time_gaps.append(time_gap_days)
-
-                # Build warping-path lags from stable segments
-                p1_combined = []
-                q1_combined = []
-                pair_lags = []
-                for seg_result in segment_results:
-                    seg_wp = seg_result['warping_path']
-                    seg_start = seg_result['start_idx']
-                    for k in range(len(seg_wp)):
-                        gp = seg_start + seg_wp[k, 0]
-                        gq = seg_start + seg_wp[k, 1]
-                        p1_combined.append(gp)
-                        q1_combined.append(gq)
-                        if gp < len(s1) and gq < len(s1):
-                            pair_lags.append(s1[gp] - s1[gq])
-                p1 = np.array(p1_combined) if p1_combined else np.array([], dtype=int)
-                q1 = np.array(q1_combined) if q1_combined else np.array([], dtype=int)
-                lags.append(pair_lags if pair_lags else [0.0])
-
-                curvatures.append(curvature1.copy())
-                migration_distances.append(distances.copy())
-                along_channel_distances.append(s1.copy())
-                centerline_coords.append({
-                    'x1': x1.copy(), 'y1': y1.copy(),
-                    'x2': x2.copy(), 'y2': y2.copy()
-                })
-
-                pair_info.append({
-                    'river1_index': info1['original_index'],
-                    'river2_index': info2['original_index'],
-                    'date1': info1['date'],
-                    'date2': info2['date'],
-                    'year1': info1['year'],
-                    'year2': info2['year'],
-                    'time_gap_days': time_gap_days,
-                    'time_gap_years': time_gap_years,
-                    's1': s1, 's2': s2,
-                    'width1': width1,
-                    'width2': width2,
-                    'dtw_cost': combined_cost,
-                    'n_correspondences': len(p),
-                    'n_valid_distances': np.sum(valid_mask),
-                    'p_centerline': p, 'q_centerline': q,
-                    'p_curv_mr': p1, 'q_curv_mr': q1,
-                    'high_variance_segments': high_variance_segments,
-                    'n_high_variance_segments': len(high_variance_segments),
-                    'n_stable_segments': n_stable_segments,
-                    'total_stable_length': total_stable_length,
-                    'stable_data_ratio': (total_stable_length / len(distances)
-                                          if len(distances) > 0 else 0),
-                    'segment_results': segment_results
-                })
+                lags.append(pair['lags'])
+                curvatures.append(pair['curvature'])
+                migration_distances.append(pair['distances'])
+                along_channel_distances.append(pair['s'])
+                centerline_coords.append(pair['centerline_coords'])
+                pair_info.append(pair['pair_info'])
                 n_valid_pairs += 1
 
             except Exception as e:
@@ -1803,14 +1681,17 @@ def detect_high_variance_segments(data, window_size=50, variance_threshold=100.0
     data = np.array(data)
     n = len(data)
     
-    # Calculate moving variance
-    variance_profile = np.zeros(n)
-    
-    for i in range(n):
-        start = max(0, i - window_size // 2)
-        end = min(n, i + window_size // 2)
-        window_data = data[start:end]
-        variance_profile[i] = np.var(window_data)
+    # Calculate moving variance (vectorized with cumulative sums)
+    half = window_size // 2
+    starts = np.maximum(0, np.arange(n) - half)
+    ends = np.minimum(n, np.arange(n) + half)  # exclusive
+    csum = np.concatenate([[0.0], np.cumsum(data)])
+    csum2 = np.concatenate([[0.0], np.cumsum(data**2)])
+    counts = ends - starts
+    with np.errstate(invalid='ignore', divide='ignore'):
+        means = (csum[ends] - csum[starts]) / counts
+        variance_profile = np.maximum((csum2[ends] - csum2[starts]) / counts - means**2, 0.0)
+    variance_profile = np.where(counts > 0, variance_profile, np.nan)
     
     # Smooth the variance profile to avoid noise
     variance_smooth = ndimage.gaussian_filter1d(variance_profile, sigma=window_size//10)
@@ -1921,11 +1802,7 @@ def run_dtw_by_stable_segments(distances, curvatures, s1, high_variance_segments
             seg_curv_norm = np.zeros_like(seg_curv)
         
         # Create similarity matrix for this segment
-        n_seg = len(seg_distances)
-        sm_seg = np.zeros((n_seg, n_seg))
-        
-        for k in range(n_seg):
-            sm_seg[k, :] = (np.abs(seg_mr_norm - seg_curv_norm[k]))**0.15
+        sm_seg = np.abs(seg_mr_norm[None, :] - seg_curv_norm[:, None]) ** 0.15
         
         # Run DTW on this segment
         try:
@@ -2175,9 +2052,6 @@ def plot_dtw_segments(pair_idx, results):
     low_var_distances = np.concatenate([distances[seg['start_idx']:seg['end_idx']+1] for seg in segment_results])
     low_var_curvatures = np.concatenate([curvatures[seg['start_idx']:seg['end_idx']+1] for seg in segment_results])
 
-    mr = distances / time_gap_years  # convert distances to migration rates
-    curv = -curvatures * W  # Normalized curvature (note: negative sign)
-
     # Calculate min/max using only low-variance segments
     low_var_mr = low_var_distances / time_gap_years
     low_var_curv = -low_var_curvatures * W
@@ -2230,7 +2104,6 @@ def create_dataframe_from_results(results):
     for pair_idx in range(len(results['pair_info'])):
         pair_info = results['pair_info'][pair_idx]
         distances = results['migration_distances'][pair_idx]  # meters
-        curvature1 = results['curvatures'][pair_idx]
         mr = distances / pair_info['time_gap_years']  # meters per year
         p90_mr = np.percentile(mr, 90)
         p90_mrs.append(p90_mr)
@@ -2345,7 +2218,6 @@ def create_dataframe_from_results(results):
     stable_data_ratios = np.array(stable_data_ratios)
 
     # Create DataFrame
-    import pandas as pd
     df_lag_mr = pd.DataFrame({
         'lag (m)': mean_lags,
         'p90_mr (m/year)': p90_mrs,
@@ -2428,9 +2300,7 @@ def classify_pairs(r_curv_mr, r_squared_curv_mr, width_slope,
         - ``'weak'`` — |r| < r_threshold (no clear relationship)
         - ``'insufficient'`` — NaN correlation (not enough data)
     """
-    import pandas as pd
     r = np.asarray(r_curv_mr, dtype=float)
-    r2 = np.asarray(r_squared_curv_mr, dtype=float)
     ws = np.asarray(width_slope, dtype=float)
 
     classes = np.full(len(r), 'insufficient', dtype=object)
@@ -2491,7 +2361,6 @@ def analyze_all_segment_groups(segment_groups, river_name=None, **kwargs):
         Keyed by segment index tuple; values are the raw result dicts
         from :func:`analyze_segment_group`.
     """
-    import pandas as pd
 
     dfs = []
     raw_results = {}

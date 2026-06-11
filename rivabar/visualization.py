@@ -1,16 +1,15 @@
 import matplotlib.pyplot as plt
 import numpy as np
-import warnings
 from tqdm import tqdm, trange
 from scipy.signal import savgol_filter
-from matplotlib.collections import PatchCollection, LineCollection
+from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from shapely.geometry import Polygon, LineString
 import rasterio
 
 # Internal imports
-from .geometry_utils import find_closest_point, getExtrapolatedLine, angle_between
-from .polygon_processing import smooth_line, remove_endpoints, vertex_density_tolerance, create_main_channel_banks
+from .geometry_utils import find_closest_point
+from .polygon_processing import smooth_line, remove_endpoints
 
 def plot_im_and_lines(im, left_utm_x, right_utm_x, lower_utm_y, upper_utm_y, G_rook, 
                 G_primal, D_primal=None, plot_main_banklines=True, plot_lines=True, plot_image=True, 

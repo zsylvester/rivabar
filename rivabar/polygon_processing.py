@@ -1,11 +1,10 @@
 import numpy as np
 from scipy.signal import savgol_filter
-from shapely.geometry import Polygon, LineString, MultiPolygon, LinearRing, MultiLineString
+from shapely.geometry import Polygon, LineString, MultiPolygon, LinearRing
 from shapely.geometry.polygon import InteriorRingSequence
-from shapely.ops import unary_union, split, linemerge, orient
+from shapely.ops import split, linemerge, orient
 import matplotlib.pyplot as plt
 from .geometry_utils import find_closest_point, getExtrapolatedLine
-from shapely.geometry import Polygon, LineString, LinearRing
 from matplotlib.path import Path
 from matplotlib.patches import PathPatch
 from matplotlib.collections import PatchCollection
@@ -477,67 +476,6 @@ def create_channel_nw_polygon(G_rook, buffer=10, ch_mouth_poly=None, dataset=Non
     ch_nw_poly = ch_nw_poly.simplify(0.1, preserve_topology=True)
     return ch_nw_poly
 
-def create_channel_nw_polygon_old(G_rook, buffer=10, ch_mouth_poly=None, dataset=None):
-    """
-    Creates a polygon representing the channel network.
-
-    Parameters
-    ----------
-    """
-    both_banks = G_rook.nodes()[0]['bank_polygon'].buffer(buffer).union(G_rook.nodes()[1]['bank_polygon'].buffer(buffer))
-    if type(both_banks) == Polygon and len(both_banks.interiors) > 0:
-        ch_belt_pieces = both_banks.interiors
-    else:
-        im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0, dataset.shape[1]), dataset.xy(dataset.shape[0], dataset.shape[1]), dataset.xy(dataset.shape[0], 0)])
-        ch_belt_pieces= im_boundary.buffer(-10).difference(G_rook.nodes()[0]['bank_polygon'].buffer(10).union(G_rook.nodes()[1]['bank_polygon'].buffer(10)))
-    # print(type(ch_belt_pieces))
-    if type(ch_belt_pieces)==InteriorRingSequence:
-        temp = []
-        for i in range(len(ch_belt_pieces)):
-            temp.append(Polygon(ch_belt_pieces[i]))
-        ch_belt_pieces = temp
-        if len(ch_belt_pieces) > 0:
-            ch_nw_poly = ch_belt_pieces[0].buffer(buffer)
-            if len(ch_belt_pieces) > 1:
-                for ch_belt_piece in ch_belt_pieces[1:]:
-                    ch_nw_poly = ch_nw_poly.union(ch_belt_piece.buffer(buffer))
-    elif type(ch_belt_pieces) == Polygon: # if the channel belt is a single polygon
-        ch_nw_poly = ch_belt_pieces.buffer(buffer)
-    elif type(ch_belt_pieces) == MultiPolygon:
-        for geom in ch_belt_pieces.geoms:
-            for i in range(2,len(G_rook.nodes())):
-                if geom.contains(G_rook.nodes()[i]['bank_polygon']):
-                    ch_nw_poly = geom.buffer(buffer)
-                    break
-    if type(ch_nw_poly) == MultiPolygon:
-        areas = []
-        for geom in ch_nw_poly.geoms:
-            areas.append(geom.area)
-        ch_nw_poly = ch_nw_poly.geoms[np.argmax(areas)]
-    if len(G_rook) > 2: # if there are islands, add the bank polygons as holes
-        holes = [] # create list of holes
-        for node in range(2, len(G_rook)):
-            holes.append(G_rook.nodes()[node]['bank_polygon'].exterior)
-        ch_nw_poly = Polygon(ch_nw_poly.exterior, holes)
-    if ch_mouth_poly:
-        outer_polygon = Polygon(ch_nw_poly.exterior).difference(ch_mouth_poly.buffer(10)).buffer(0)
-        smaller_polygons = []
-        for geom in ch_nw_poly.interiors:
-            if outer_polygon.contains(geom):
-                smaller_polygons.append(Polygon(geom).buffer(0))
-            if outer_polygon.overlaps(Polygon(geom)):
-                part_to_be_removed = Polygon(geom).buffer(0).difference(outer_polygon)
-                smaller_polygons.append(Polygon(geom).buffer(0).difference(part_to_be_removed))
-        if type(outer_polygon) == MultiPolygon:
-            areas = []
-            for geom in outer_polygon.geoms:
-                areas.append(geom.area)
-            outer_polygon = outer_polygon.geoms[np.argmax(areas)]
-        ch_nw_poly = Polygon(outer_polygon.exterior, [p.exterior for p in smaller_polygons])
-    return ch_nw_poly
-
-
-
 def straighten_channel(xl, yl, xls, yls):
     """
     Straighten a channel while preserving local shapes.
@@ -571,10 +509,6 @@ def straighten_channel(xl, yl, xls, yls):
     ds = np.sqrt(dxs**2 + dys**2)
     s = np.zeros(len(xls))
     s[1:] = np.cumsum(ds)
-    
-    # Create a straight reference line with the same total length
-    xref = np.zeros_like(xls)
-    yref = s
     
     # For each point in the original centerline, find the closest point on the smoothed centerline
     xl_straight = np.zeros_like(xl)
@@ -878,7 +812,6 @@ def polygon_to_svg(geometry, filename, width=4000, height=800,
         f.write(f'<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">\n')
         
         # Process each polygon
-        count = 0
         for poly_idx, polygon in enumerate(polygons):
             # Write exterior polygon
             f.write(f'  <g id="polygon_{poly_idx}_exterior" fill="{fill_color[poly_idx]}" ' + 

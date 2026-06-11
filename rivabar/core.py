@@ -1,6 +1,5 @@
 import sys
 import numpy as np
-from matplotlib import pyplot as plt
 import warnings
 import cv2
 from tqdm import tqdm, trange
@@ -12,13 +11,13 @@ import networkx as nx
 import geopandas
 from libpysal import weights
 from shapely.geometry import (
-    LineString, Polygon, MultiPolygon, Point, 
+    LineString, Polygon, MultiPolygon,
     GeometryCollection, MultiLineString
 )
 from shapely.ops import split, polygonize_full, linemerge
 import momepy
 
-from .data_io import create_mndwi, save_shapefiles, write_shapefiles_and_graphs
+from .data_io import create_mndwi
 from .geometry_utils import (
     find_graph_edges_close_to_start_and_end_points, 
     insert_node, convert_to_utm, getExtrapolatedLine
@@ -31,16 +30,13 @@ from .graph_processing import (
     extend_cline, find_start_node, traverse_multigraph,
     find_tributary_branches
 )
-from .utils import resample_and_smooth, find_numbers_between
+from .utils import resample_and_smooth
 from .polygon_processing import smooth_banklines
 from .analysis import (
-    set_half_channel_widths, get_bank_coords, 
-    get_bank_coords_for_main_channel,
-    get_channel_widths_along_path,
-    analyze_width_and_wavelength,
-    filter_outlier_paths
+    set_half_channel_widths, get_bank_coords,
+    get_bank_coords_for_main_channel
 )
-from .visualization import plot_im_and_lines, plot_graph_w_colors, read_and_plot_im
+from .visualization import plot_im_and_lines, plot_graph_w_colors
 
 
 def _initial_skeletonization_and_graph_setup(fname, dirname, start_x, start_y, end_x, end_y, file_type,
@@ -109,6 +105,59 @@ def _initial_skeletonization_and_graph_setup(fname, dirname, start_x, start_y, e
     return graph, start_ind, end_ind, mndwi, dataset, left_utm_x, upper_utm_y, right_utm_x, lower_utm_y, delta_x, delta_y
 
 
+def _path_from_largest_component(graph, nodes1, nodes2, start_ind, end_ind,
+                                 left_utm_x, upper_utm_y, delta_x, delta_y):
+    """
+    Fallback main-path search when the start and end nodes are disconnected.
+
+    Picks the larger of the two reachable node sets, finds its node closest
+    to the other endpoint, and connects them with a shortest path. If that
+    path is too short, searches the largest connected components for the one
+    closest to both endpoints.
+
+    Returns (path, start_ind, end_ind); the inputs are returned unchanged
+    when no path can be found.
+    """
+    if len(nodes1) >= len(nodes2): # choose the longer path
+        path = nodes1
+        main_node = start_ind
+        other_node = end_ind
+    else:
+        path = nodes2
+        main_node = end_ind
+        other_node = start_ind
+    # need to recreate 'path' as a shortest path between two nodes on the main river channel:
+    dist, other_node = find_distance_between_nodes_and_other_node(graph, path, other_node,
+                                            left_utm_x, upper_utm_y, delta_x, delta_y)
+    start_ind_short_path = main_node
+    end_ind_short_path = other_node
+    try:
+        path = nx.shortest_path(graph, source=start_ind_short_path, target=end_ind_short_path, weight='weight')
+        if len(path) < 10:
+            print('path is too short!')
+            comps = sorted(nx.connected_components(graph), key=len, reverse=True) # list of connected components
+            dists = []
+            start_inds = []
+            end_inds = []
+            for i in range(min(5, len(comps))): # find the component that is closest to the start and end nodes
+                start_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], start_ind,
+                                                                            left_utm_x, upper_utm_y, delta_x, delta_y)
+                start_inds.append(closest_node)
+                end_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], end_ind,
+                                                                            left_utm_x, upper_utm_y, delta_x, delta_y)
+                end_inds.append(closest_node)
+                dists.append(0.5*start_ind_dist + 0.5*end_ind_dist)
+            comp_ind = np.where(dists == np.min(dists))[0][0]
+            start_ind = start_inds[comp_ind]
+            end_ind = end_inds[comp_ind]
+            path = nx.shortest_path(graph, source=start_ind, target=end_ind, weight='weight')
+        else:
+            start_ind = start_ind_short_path
+            end_ind = end_ind_short_path
+    except:
+        print('could not find path')
+    return path, start_ind, end_ind
+
 def _find_main_path_with_fallbacks(graph, start_x, start_y, end_x, end_y, start_ind, end_ind, mndwi, left_utm_x, upper_utm_y, delta_x, delta_y):
     """Phase 2: Find path between start/end points with complex fallback logic for disconnected components."""
     print('Phase 2: Finding main path with fallbacks')
@@ -160,85 +209,15 @@ def _find_main_path_with_fallbacks(graph, start_x, start_y, end_x, end_y, start_
                 end_ind = end_ind_new
             except:
                 print('still no path between start and end points')
-                if len(nodes1) >= len(nodes2): # choose the longer path
-                    path = nodes1
-                    main_node = start_ind
-                    other_node = end_ind
-                else:
-                    path = nodes2
-                    main_node = end_ind
-                    other_node = start_ind
-                # need to recreate 'path' as a shortest path between two nodes on the main river channel:
-                dist, other_node = find_distance_between_nodes_and_other_node(graph, path, other_node, 
-                                                        left_utm_x, upper_utm_y, delta_x, delta_y)    
-                start_ind_short_path = main_node
-                end_ind_short_path = other_node
-                try:
-                    path = nx.shortest_path(graph, source=start_ind_short_path, target=end_ind_short_path, weight='weight')
-                    if len(path) < 10:
-                        print('path is too short!')
-                        comps = sorted(nx.connected_components(graph), key=len, reverse=True) # list of connected components
-                        dists = []
-                        start_inds = []
-                        end_inds = []
-                        for i in range(5): # find the component that is closest to the start and end nodes
-                            start_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], start_ind, 
-                                                                                        left_utm_x, upper_utm_y, delta_x, delta_y)
-                            start_inds.append(closest_node)
-                            end_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], end_ind, 
-                                                                                        left_utm_x, upper_utm_y, delta_x, delta_y)
-                            end_inds.append(closest_node)
-                            dists.append(0.5*start_ind_dist + 0.5*end_ind_dist)
-                        comp_ind = np.where(dists == np.min(dists))[0][0]
-                        start_ind = start_inds[comp_ind]
-                        end_ind = end_inds[comp_ind]
-                        path = nx.shortest_path(graph, source=start_ind, target=end_ind, weight='weight')
-                    else:
-                        start_ind = start_ind_short_path
-                        end_ind = end_ind_short_path
-                except:
-                    print('could not find path')
-        
+                path, start_ind, end_ind = _path_from_largest_component(
+                    graph, nodes1, nodes2, start_ind, end_ind,
+                    left_utm_x, upper_utm_y, delta_x, delta_y)
+
         else:
             print('distance too large between nodes1 and nodes2')
-            if len(nodes1) >= len(nodes2): # choose the longer path
-                path = nodes1
-                main_node = start_ind
-                other_node = end_ind
-            else:
-                path = nodes2
-                main_node = end_ind
-                other_node = start_ind
-            # need to recreate 'path' as a shortest path between two nodes on the main river channel:
-            dist, other_node = find_distance_between_nodes_and_other_node(graph, path, other_node, 
-                                                    left_utm_x, upper_utm_y, delta_x, delta_y)    
-            start_ind_short_path = main_node
-            end_ind_short_path = other_node
-            try:
-                path = nx.shortest_path(graph, source=start_ind_short_path, target=end_ind_short_path, weight='weight')
-                if len(path) < 10:
-                    print('path is too short!')
-                    comps = sorted(nx.connected_components(graph), key=len, reverse=True) # list of connected components
-                    dists = []
-                    start_inds = []
-                    end_inds = []
-                    for i in range(5): # find the component that is closest to the start and end nodes
-                        start_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], start_ind, 
-                                                                                    left_utm_x, upper_utm_y, delta_x, delta_y)
-                        start_inds.append(closest_node)
-                        end_ind_dist, closest_node = find_distance_between_nodes_and_other_node(graph, comps[i], end_ind, 
-                                                                                    left_utm_x, upper_utm_y, delta_x, delta_y)
-                        end_inds.append(closest_node)
-                        dists.append(0.5*start_ind_dist + 0.5*end_ind_dist)
-                    comp_ind = np.where(dists == np.min(dists))[0][0]
-                    start_ind = start_inds[comp_ind]
-                    end_ind = end_inds[comp_ind]
-                    path = nx.shortest_path(graph, source=start_ind, target=end_ind, weight='weight')
-                else:
-                    start_ind = start_ind_short_path
-                    end_ind = end_ind_short_path
-            except:
-                print('could not find path')
+            path, start_ind, end_ind = _path_from_largest_component(
+                graph, nodes1, nodes2, start_ind, end_ind,
+                left_utm_x, upper_utm_y, delta_x, delta_y)
     return graph, path, start_ind, end_ind
 
 def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius,
@@ -289,11 +268,11 @@ def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius,
     # Remove edges that link a node to itself
     G = _remove_self_loops(G)
     
-    # Extend edges to nodes
-    for s, e, d in G.edges:
-        for i in range(len(G[s][e])):
-            x, y = extend_cline(G, s, e, i)
-            G[s][e][i]['pts'] = np.vstack((y, x)).T
+    # Extend edges to nodes (iterate keys once so parallel edges are not
+    # extended multiple times, which would duplicate their endpoints)
+    for s, e, d in G.edges(keys=True):
+        x, y = extend_cline(G, s, e, d)
+        G[s][e][d]['pts'] = np.vstack((y, x)).T
     
     # Fix edge superposition issues (complex geometric processing from original)
     _fix_edge_superposition(G)
@@ -304,13 +283,8 @@ def _process_graph_and_extend_edges(graph, path, start_ind, end_ind, radius,
 
 
 def _remove_self_loops(G):
-    """Remove edges that link a node to itself."""
-    edges_to_be_removed = []
-    for node in G.nodes:
-        for neighbor in list(nx.neighbors(G, node)):
-            if neighbor == node:
-                edges_to_be_removed.append((node, neighbor))
-    G.remove_edges_from(edges_to_be_removed)
+    """Remove edges that link a node to itself (including parallel self-loops)."""
+    G.remove_edges_from(list(nx.selfloop_edges(G, keys=True)))
     return G
 
 
@@ -394,18 +368,17 @@ def _polygonize_and_process_centerlines(G, main_path):
     
     # Create linestrings for polygonization
     clines = []
-    for s, e, d in tqdm(G.edges):
-        for i in range(len(G[s][e])):
-            x = G[s][e][i]['pts'][:,1]
-            y = G[s][e][i]['pts'][:,0]
-            if len(x) > 1:
+    for s, e, d in tqdm(G.edges(keys=True)):
+        x = G[s][e][d]['pts'][:,1]
+        y = G[s][e][d]['pts'][:,0]
+        if len(x) > 1:
+            line = LineString(np.vstack((x, y)).T)
+            if not line.is_simple:
+                x = G[s][e][d]['pts'][:,1][1:-1]
+                y = G[s][e][d]['pts'][:,0][1:-1]
                 line = LineString(np.vstack((x, y)).T)
-                if not line.is_simple:
-                    x = G[s][e][i]['pts'][:,1][1:-1]
-                    y = G[s][e][i]['pts'][:,0][1:-1]
-                    line = LineString(np.vstack((x, y)).T)
-                if line not in clines:
-                    clines.append(line)
+            if line not in clines:
+                clines.append(line)
     
     # Polygonize
     cline_polys = list(polygonize_full(clines))
@@ -493,29 +466,18 @@ def _create_channel_belt_and_boundaries(xcoords, ycoords, xcoords_sm, ycoords_sm
     # Trim the boundary polygons so that they do not overlap with the channel belt polygons
     if len(gdf) > 0:
         chb_poly = gdf.geometry.unary_union
-        poly1_diff = poly1.difference(chb_poly)
-        if type(poly1_diff) == MultiPolygon:
-            poly1_diff = max(poly1_diff.geoms, key=lambda a: a.area)
         geoms_to_be_deleted = []
-        if len(poly1_diff.interiors) > 0:
-            for ind in range(len(poly1_diff.interiors)):
-                count = 0
-                for poly in gdf['geometry']:
-                    if Polygon(poly1_diff.interiors[ind]).area == poly.area:
+        trimmed = []
+        for poly in (poly1, poly2):
+            poly_diff = poly.difference(chb_poly)
+            if type(poly_diff) == MultiPolygon:
+                poly_diff = max(poly_diff.geoms, key=lambda a: a.area)
+            for interior in poly_diff.interiors:
+                for count, g in enumerate(gdf['geometry']):
+                    if Polygon(interior).area == g.area:
                         geoms_to_be_deleted.append(count)
-                    count += 1
-        poly1 = Polygon(poly1_diff.exterior)
-        poly2_diff = poly2.difference(chb_poly)
-        if type(poly2_diff) == MultiPolygon:
-            poly2_diff = max(poly2_diff.geoms, key=lambda a: a.area)
-        if len(poly2_diff.interiors) > 0:
-            for ind in range(len(poly2_diff.interiors)):
-                count = 0
-                for poly in gdf['geometry']:
-                    if Polygon(poly2_diff.interiors[ind]).area == poly.area:
-                        geoms_to_be_deleted.append(count)
-                    count += 1
-        poly2 = Polygon(poly2_diff.exterior)
+            trimmed.append(Polygon(poly_diff.exterior))
+        poly1, poly2 = trimmed
         gdf.drop(geoms_to_be_deleted, axis=0, inplace=True)
     
     # only keep the largest polygons from the resulting multipolygons:
@@ -526,47 +488,31 @@ def _create_channel_belt_and_boundaries(xcoords, ycoords, xcoords_sm, ycoords_sm
     
     return xs, ys, poly1, poly2, xcoords1, xcoords2, ycoords1, ycoords2
 
+def _to_largest_utm_polygon(poly, im_boundary, left_utm_x, upper_utm_y, delta_x, delta_y, name):
+    """
+    Convert a pixel-space polygon's exterior to UTM, trim it to the image
+    boundary, and keep the largest polygon when the result is multi-part.
+    """
+    x, y = convert_to_utm(np.array(poly.exterior.xy[0]), np.array(poly.exterior.xy[1]),
+                          left_utm_x, upper_utm_y, delta_x, delta_y)
+    poly_utm = Polygon(np.vstack((x, y)).T)
+    poly_utm = im_boundary.intersection(poly_utm) # trim polygon to image size
+    if type(poly_utm) == MultiPolygon:
+        poly_utm = max(poly_utm.geoms, key=lambda g: g.area)
+    elif type(poly_utm) == GeometryCollection:
+        polys = [g for g in poly_utm.geoms if type(g) == Polygon]
+        if len(polys) > 1:
+            print(f'there are more than one polygons in {name}!')
+        poly_utm = max(polys, key=lambda g: g.area)
+    return poly_utm
+
 def _create_UTM_geodataframe(gdf, poly1, poly2, left_utm_x, upper_utm_y, delta_x, delta_y, dataset, mndwi):
     """Phase 7: Create UTM geodataframe"""
     print('Phase 7: Create UTM geodataframe')
 
-    x, y = convert_to_utm(np.array(poly1.exterior.xy[0]), np.array(poly1.exterior.xy[1]),
-                    left_utm_x, upper_utm_y, delta_x, delta_y)
-    poly1_utm = Polygon(np.vstack((x, y)).T)
     im_boundary = Polygon([dataset.xy(0,0), dataset.xy(0,mndwi.shape[1]), dataset.xy(mndwi.shape[0], mndwi.shape[1]), dataset.xy(mndwi.shape[0], 0)])
-    poly1_utm = im_boundary.intersection(poly1_utm) # trim polygon to image size
-    if type(poly1_utm) == MultiPolygon:
-        poly_areas = []
-        for geom in poly1_utm.geoms:
-            poly_areas.append(geom.area)
-        poly1_utm = poly1_utm.geoms[np.argmax(poly_areas)]
-    if type(poly1_utm) == GeometryCollection:
-        for i in range(len(poly1_utm.geoms)):
-            count = 0
-            if type(poly1_utm.geoms[i]) == Polygon:
-                main_poly_ind = i
-                count += 1
-        if count > 1:
-            print('there are more than one polygons in poly1_utm!')
-        poly1_utm = poly1_utm.geoms[main_poly_ind]
-    x, y = convert_to_utm(np.array(poly2.exterior.xy[0]), np.array(poly2.exterior.xy[1]),
-                    left_utm_x, upper_utm_y, delta_x, delta_y)
-    poly2_utm = Polygon(np.vstack((x, y)).T)
-    poly2_utm = im_boundary.intersection(poly2_utm)
-    if type(poly2_utm) == MultiPolygon:
-        poly_areas = []
-        for geom in poly2_utm.geoms:
-            poly_areas.append(geom.area)
-        poly2_utm = poly2_utm.geoms[np.argmax(poly_areas)]
-    if type(poly2_utm) == GeometryCollection:
-        for i in range(len(poly2_utm.geoms)):
-            count = 0
-            if type(poly2_utm.geoms[i]) == Polygon:
-                main_poly_ind = i
-                count += 1
-        if count > 1:
-            print('there are more than one polygons in poly2_utm!')
-        poly2_utm = poly2_utm.geoms[main_poly_ind]
+    poly1_utm = _to_largest_utm_polygon(poly1, im_boundary, left_utm_x, upper_utm_y, delta_x, delta_y, 'poly1_utm')
+    poly2_utm = _to_largest_utm_polygon(poly2, im_boundary, left_utm_x, upper_utm_y, delta_x, delta_y, 'poly2_utm')
 
     utm_polys = [poly1_utm, poly2_utm]
     # creating centerline polygons:
@@ -681,6 +627,22 @@ def _create_primal_graph(gdf2, xcoords1, ycoords1, xcoords2, ycoords2, left_utm_
 
     return G_primal, primal_start_ind, primal_end_ind
 
+def _extend_and_split_bankline(x_poly, y_poly, poly_utm, ch_belt_half_width, delta_x):
+    """
+    Lengthen a bankline at both ends so that it crosses *poly_utm*, split the
+    polygon with it, and return the exterior coordinates of the largest piece.
+    The extension ratio is computed per end from the local segment length.
+    """
+    ratio1 = float(ch_belt_half_width)*delta_x/(np.sqrt((x_poly[1]-x_poly[0])**2 + (y_poly[1]-y_poly[0])**2))
+    a1, b1 = getExtrapolatedLine((x_poly[1], y_poly[1]), (x_poly[0], y_poly[0]), float(ratio1))
+    ratio2 = float(ch_belt_half_width)*delta_x/(np.sqrt((x_poly[-1]-x_poly[-2])**2 + (y_poly[-1]-y_poly[-2])**2))
+    a2, b2 = getExtrapolatedLine((x_poly[-2], y_poly[-2]), (x_poly[-1], y_poly[-1]), float(ratio2))
+    x_poly = np.hstack((b1[0], x_poly, b2[0]))
+    y_poly = np.hstack((b1[1], y_poly, b2[1]))
+    poly_split = split(poly_utm, LineString(np.vstack((x_poly, y_poly)).T))
+    largest = max(poly_split.geoms, key=lambda g: g.area)
+    return largest.exterior.xy[0], largest.exterior.xy[1]
+
 def _create_rook_graph(gdf2, poly1_utm, poly2_utm, mndwi, dataset, ch_belt_half_width, delta_x, filter_contours=False):
     """Phase 9: Create rook graph"""
     print('Phase 9: Create rook graph')
@@ -688,29 +650,8 @@ def _create_rook_graph(gdf2, poly1_utm, poly2_utm, mndwi, dataset, ch_belt_half_
     x1_poly, y1_poly, ch_map = get_bank_coords(poly1_utm, mndwi, dataset, timer=True, filter_contours=filter_contours)
     x2_poly, y2_poly, ch_map = get_bank_coords(poly2_utm, mndwi, dataset, timer=True, filter_contours=filter_contours)
     # need to lengthen the banklines so that they intersect the main centerline polygons:
-    ratio = float(ch_belt_half_width)*delta_x/(np.sqrt((x1_poly[1]-x1_poly[0])**2 + (y1_poly[1]-y1_poly[0])**2))
-    a1, b1 = getExtrapolatedLine((x1_poly[1], y1_poly[1]), (x1_poly[0], y1_poly[0]), float(ratio))
-    a2, b2 = getExtrapolatedLine((x1_poly[-2], y1_poly[-2]), (x1_poly[-1], y1_poly[-1]), float(ratio))
-    x1_poly = np.hstack((b1[0], x1_poly, b2[0]))
-    y1_poly = np.hstack((b1[1], y1_poly, b2[1]))
-    a1, b1 = getExtrapolatedLine((x2_poly[1], y2_poly[1]), (x2_poly[0], y2_poly[0]), float(ratio))
-    a2, b2 = getExtrapolatedLine((x2_poly[-2], y2_poly[-2]), (x2_poly[-1], y2_poly[-1]), float(ratio))
-    x2_poly = np.hstack((b1[0], x2_poly, b2[0]))
-    y2_poly = np.hstack((b1[1], y2_poly, b2[1]))
-
-    poly1_split = split(poly1_utm, LineString(np.vstack((x1_poly, y1_poly)).T))
-    areas = []
-    for geom in poly1_split.geoms:
-        areas.append(geom.area)
-    x1_poly = poly1_split.geoms[np.argmax(areas)].exterior.xy[0]
-    y1_poly = poly1_split.geoms[np.argmax(areas)].exterior.xy[1]
-
-    poly2_split = split(poly2_utm, LineString(np.vstack((x2_poly, y2_poly)).T))
-    areas = []
-    for geom in poly2_split.geoms:
-        areas.append(geom.area)
-    x2_poly = poly2_split.geoms[np.argmax(areas)].exterior.xy[0]
-    y2_poly = poly2_split.geoms[np.argmax(areas)].exterior.xy[1]
+    x1_poly, y1_poly = _extend_and_split_bankline(x1_poly, y1_poly, poly1_utm, ch_belt_half_width, delta_x)
+    x2_poly, y2_poly = _extend_and_split_bankline(x2_poly, y2_poly, poly2_utm, ch_belt_half_width, delta_x)
 
     utm_coords.append(np.vstack((x1_poly, y1_poly)).T)
     utm_coords.append(np.vstack((x2_poly, y2_poly)).T)
@@ -825,7 +766,7 @@ def map_river_banks(fname, dirname, start_x, start_y, end_x, end_y, file_type,
     if G_rook is None:
         return None, None, None, None, None, None, None, None, None, None, None
     
-    polys = smooth_banklines(G_rook, dataset, mndwi, save_smooth_lines=True)
+    smooth_banklines(G_rook, dataset, mndwi, save_smooth_lines=True)
     
     # Phase 10: Set half channel widths
     print('Phase 10: Set half channel widths')
