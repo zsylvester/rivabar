@@ -1139,3 +1139,265 @@ def plot_prediction_map(results, pair_idx, calibration, prediction=None,
     ax.set_ylabel('Northing (m)')
 
     return ax
+
+def select_aoi_interactive(image, extent, title=None):
+    """
+    Display an image and let the user select a rectangular area of interest.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Image to display (e.g., a normalized false-color image).
+    extent : list
+        [left, right, bottom, top] coordinates of the image.
+    title : str, optional
+        Title for the plot (e.g., the scene date).
+
+    Returns
+    -------
+    list
+        [left, right, bottom, top] AOI bounds in the image's coordinates.
+    """
+    from matplotlib.patches import Rectangle
+
+    print("Interactive AOI selection: click two points to define a rectangle "
+          "(two opposite corners)")
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.imshow(image, extent=extent, origin='upper')
+    ax.set_xlabel('UTM Easting (m)')
+    ax.set_ylabel('UTM Northing (m)')
+    ax.set_title((title + '\n' if title else '') +
+                 'Click two points: two opposite corners of the AOI')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show(block=False)
+
+    points = plt.ginput(2, timeout=0)
+    if len(points) != 2:
+        plt.close(fig)
+        raise ValueError("Need exactly 2 points to define the AOI")
+
+    (x1, y1), (x2, y2) = points
+    left, right = min(x1, x2), max(x1, x2)
+    bottom, top = min(y1, y2), max(y1, y2)
+
+    width, height = right - left, top - bottom
+    rect = Rectangle((left, bottom), width, height,
+                     linewidth=2, edgecolor='red', facecolor='none')
+    ax.add_patch(rect)
+    ax.set_title(f'Selected AOI: {width:.0f} m x {height:.0f} m')
+    plt.draw()
+    print(f"AOI selected: {width:.0f} m x {height:.0f} m, "
+          f"bounds: ({left:.0f}, {bottom:.0f}) to ({right:.0f}, {top:.0f})")
+    return [left, right, bottom, top]
+
+
+def _plot_channel_polygon_on_axes(river, aoi_bounds, axes):
+    """Draw the plain (light blue) channel polygon of *river* on each of *axes*."""
+    from shapely.geometry import box
+    from .polygon_processing import create_channel_nw_polygon, plot_polygon
+
+    ch = create_channel_nw_polygon(river._G_rook, buffer=10, dataset=river._dataset)
+    xmin, xmax, ymin, ymax = aoi_bounds
+    cropped_ch = ch.intersection(box(xmin, ymin, xmax, ymax))
+    for ax in axes:
+        plot_polygon(ax, cropped_ch, facecolor='lightblue', edgecolor='k', alpha=1)
+
+
+def make_river_evolution_frames(matched_rivers, image_stack, dates, aoi_bounds,
+                                output_dir='river_evolution_figures',
+                                select_dates=None, baseline_index=0,
+                                depo_cmap='plasma', erosion_cmap='plasma',
+                                alpha=1.0, dpi=300, scalebar=True,
+                                date_fontsize=14, frame_prefix='river_evolution'):
+    """
+    Render animation frames showing river evolution through time.
+
+    Each frame has three panels: the (false-color) image, the image with
+    cumulative deposition polygons, and the image with cumulative erosion
+    polygons (colored by age via :func:`create_and_plot_bars`). Frames where
+    deposition/erosion cannot be computed (the first frame, and any frame
+    fewer than two time steps after *baseline_index*) show the plain channel
+    polygon instead.
+
+    The three input lists must be aligned (same length, same order), as
+    returned by :func:`match_rivers_to_images` and :func:`prepare_image_stack`.
+
+    Parameters
+    ----------
+    matched_rivers : list of River
+        Processed rivers, in date order.
+    image_stack : list of numpy.ndarray or None
+        Cropped, normalized background images (None entries are skipped).
+    dates : list of datetime.datetime
+        Acquisition dates, used for frame labels and filenames.
+    aoi_bounds : list
+        [left, right, bottom, top] of the area of interest.
+    output_dir : str, optional
+        Directory for the output PNGs (created if needed).
+    select_dates : list of str or None, optional
+        If given, only rivers whose ``acquisition_date`` ('YYYY-MM-DD') is in
+        this list are rendered. None (default) renders all.
+    baseline_index : int, optional
+        Index of the river used as time step 1 for the cumulative
+        deposition/erosion maps (default 0).
+    depo_cmap, erosion_cmap : str, optional
+        Colormaps for deposition and erosion polygons (default 'plasma').
+    alpha : float, optional
+        Transparency of the deposition/erosion polygons (default 1.0).
+    dpi : int, optional
+        Resolution of the saved figures (default 300).
+    scalebar : bool, optional
+        Whether to add scale bars (requires the optional matplotlib-scalebar
+        package; silently skipped with a warning if not installed).
+    date_fontsize : int, optional
+        Font size of the date label (default 14).
+    frame_prefix : str, optional
+        Filename prefix for the frames (default 'river_evolution').
+
+    Returns
+    -------
+    list of str
+        Paths of the PNG frames that were written, in order.
+    """
+    import os
+    import matplotlib.gridspec as gridspec
+    from .temporal_analysis import create_and_plot_bars
+
+    if not (len(matched_rivers) == len(image_stack) == len(dates)):
+        raise ValueError(
+            f"matched_rivers ({len(matched_rivers)}), image_stack "
+            f"({len(image_stack)}), and dates ({len(dates)}) must have the "
+            f"same length and order")
+
+    ScaleBar = None
+    if scalebar:
+        try:
+            from matplotlib_scalebar.scalebar import ScaleBar
+        except ImportError:
+            print("matplotlib-scalebar is not installed; skipping scale bars "
+                  "(pip install matplotlib-scalebar)")
+
+    os.makedirs(output_dir, exist_ok=True)
+    written = []
+    count = 0
+    for i in range(len(matched_rivers)):
+        if select_dates is not None and matched_rivers[i].acquisition_date not in select_dates:
+            continue
+        if image_stack[i] is None:
+            print(f"Skipping {dates[i].strftime('%Y-%m-%d')}: no background image")
+            continue
+
+        fig_height = 1.6 * image_stack[i].shape[0] / 100
+        fig_width = 5 * image_stack[i].shape[1] / 100
+        fig = plt.figure(figsize=(fig_width, fig_height))
+        gs = gridspec.GridSpec(1, 3, wspace=0.001, hspace=0.02)
+        axes = [fig.add_subplot(gs[0, j]) for j in range(3)]
+        for ax in axes:
+            ax.imshow(image_stack[i], extent=aoi_bounds)
+            ax.axis('off')
+
+        axes[0].text(0.02, 0.015, dates[i].strftime('%Y-%m-%d'),
+                     transform=axes[0].transAxes, fontsize=date_fontsize,
+                     fontweight='bold', color='black',
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.5))
+
+        # Deposition/erosion needs at least two time steps after the baseline;
+        # earlier frames (and failed computations) show the channel polygon
+        plotted = False
+        if i - baseline_index >= 2:
+            chs, bars, erosions, aoi_dates, aoi_centerlines = create_and_plot_bars(
+                matched_rivers, baseline_index, i,
+                ax1=axes[1], ax2=axes[2],
+                depo_cmap=depo_cmap, erosion_cmap=erosion_cmap,
+                alpha=alpha, aoi=aoi_bounds, colorbar=False,
+                color_scale_timestep=len(matched_rivers) - 1)
+            plotted = chs is not None
+        if not plotted:
+            _plot_channel_polygon_on_axes(matched_rivers[i], aoi_bounds, axes[1:])
+
+        if ScaleBar is not None:
+            for ax in axes:
+                ax.add_artist(ScaleBar(1, "m", length_fraction=0.25,
+                                       location="lower right", border_pad=0.4,
+                                       box_alpha=0.5, color='black'))
+
+        output_filename = os.path.join(
+            output_dir, f"{frame_prefix}_{count:03d}_{dates[i].strftime('%Y%m%d')}.png")
+        fig.savefig(output_filename, dpi=dpi, bbox_inches='tight')
+        plt.close(fig)
+        written.append(output_filename)
+        count += 1
+
+    print(f"Wrote {len(written)} frames to {output_dir}")
+    return written
+
+
+def assemble_movie(frames, output_path, fps=6, width=None, crf=18):
+    """
+    Assemble PNG frames into an MP4 movie using ffmpeg.
+
+    Parameters
+    ----------
+    frames : str or list
+        Either a glob pattern (e.g. ``'river_evolution_figures/river_evolution_*.png'``),
+        a directory containing the PNG frames, or an explicit list of frame
+        paths (e.g., the return value of :func:`make_river_evolution_frames`,
+        in which case their common directory and prefix are used).
+    output_path : str
+        Path of the output .mp4 file.
+    fps : int, optional
+        Frames per second (default 6).
+    width : int, optional
+        Output width in pixels; the height is scaled proportionally. If None
+        (default), the full resolution is kept (trimmed to even dimensions,
+        as required by the H.264 encoder).
+    crf : int, optional
+        H.264 quality (lower = better/larger; default 18).
+
+    Returns
+    -------
+    str
+        The output path.
+    """
+    import glob as glob_module
+    import os
+    import shutil
+    import subprocess
+
+    ffmpeg = shutil.which('ffmpeg')
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg not found on PATH; install it (e.g. "
+                           "'brew install ffmpeg' or 'conda install ffmpeg') "
+                           "to assemble movies")
+
+    if isinstance(frames, (list, tuple)):
+        if not frames:
+            raise ValueError("No frames provided")
+        dirname = os.path.dirname(frames[0])
+        prefix = os.path.basename(frames[0]).rsplit('_', 2)[0]
+        pattern = os.path.join(dirname, f'{prefix}_*.png')
+    elif os.path.isdir(frames):
+        pattern = os.path.join(frames, '*.png')
+    else:
+        pattern = frames
+    matched = sorted(glob_module.glob(pattern))
+    if not matched:
+        raise ValueError(f"No frames match {pattern}")
+
+    if width is not None:
+        vf = f'scale={width}:-2'
+    else:
+        # H.264 with yuv420p requires even dimensions
+        vf = 'crop=trunc(iw/2)*2:trunc(ih/2)*2'
+
+    cmd = [ffmpeg, '-y', '-framerate', str(fps), '-pattern_type', 'glob',
+           '-i', pattern, '-vf', vf, '-c:v', 'libx264', '-crf', str(crf),
+           '-pix_fmt', 'yuv420p', '-movflags', '+faststart', output_path]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed:\n{result.stderr[-2000:]}")
+    print(f"Wrote {output_path} ({len(matched)} frames at {fps} fps, "
+          f"{len(matched)/fps:.1f} s)")
+    return output_path

@@ -210,9 +210,10 @@ def create_and_plot_bars(rivers, ts1, ts2, ax1=None, ax2=None, depo_cmap="Blues"
     colorbar : bool, optional
         Whether to show colorbar. Defaults to True.
     color_scale_timestep : int, optional
-        Alternative timestep to use for color scaling instead of ts2. If provided,
-        uses ts2 = min(ts1 + color_scale_timestep, len(rivers)-1) for color scaling only.
-        The actual analysis still uses the original ts1 and ts2. Defaults to None.
+        Alternative final timestep (absolute index into ``rivers``) to use for
+        color scaling instead of ts2, so that colors stay consistent across
+        plots/animation frames with different ts2 values. The actual analysis
+        still uses the original ts1 and ts2. Defaults to None.
 
     Returns
     -------
@@ -245,8 +246,8 @@ def create_and_plot_bars(rivers, ts1, ts2, ax1=None, ax2=None, depo_cmap="Blues"
     if ts2 <= ts1:
         print('ts2 must be greater than ts1!')
         return None, None, None, None, None
-    if ts2 > len(rivers):
-        print('ts2 must be <= length of "rivers"!')
+    if ts2 > len(rivers) - 1:
+        print('ts2 must be <= len(rivers) - 1!')
         return None, None, None, None, None
     if ts2 - ts1 < 2:
         print('Need at least 2 time steps (ts2 - ts1 >= 2)!')
@@ -1582,3 +1583,101 @@ def match_river_segments(rivers, common_confluences, max_snapping_distance=None,
         print(f"  {up_label} -> {down_label}: {g['n_rivers']} rivers")
 
     return segment_groups, rejected
+
+def match_rivers_to_images(rivers, image_directory, tolerance_days=1):
+    """
+    Match processed rivers to georeferenced images by acquisition date.
+
+    Scans *image_directory* for GeoTIFFs (e.g., false-color images downloaded
+    with ``River.batch_process_landsat_scenes(download_false_color=True)``),
+    parses acquisition dates from the filenames, and pairs each image with
+    the river whose acquisition date is closest (within *tolerance_days*).
+
+    Parameters
+    ----------
+    rivers : list of River
+        Processed River objects with an ``acquisition_date`` attribute
+        ('YYYY-MM-DD').
+    image_directory : str or pathlib.Path
+        Directory containing .tif images with dates in their filenames.
+        Supported filename patterns include Landsat scene/product IDs
+        (e.g. ``LC08_231064_20200515``, ``LC08_L2SP_232060_20140219_...``)
+        and generic ``YYYYMMDD`` or ``YYYY-MM-DD`` dates.
+    tolerance_days : int, optional
+        Maximum allowed difference between image and river acquisition
+        dates (default 1).
+
+    Returns
+    -------
+    matched_rivers : list of River
+        Rivers with a matching image, in image-date order.
+    image_files : list of pathlib.Path
+        The matched image files (same order and length as matched_rivers).
+    dates : list of datetime.datetime
+        Image acquisition dates (same order and length as matched_rivers).
+    """
+    from pathlib import Path
+    import re
+
+    image_directory = Path(image_directory)
+    tif_files = sorted(set(list(image_directory.glob('*.tif')) +
+                           list(image_directory.glob('*.TIF'))))
+    if not tif_files:
+        raise ValueError(f"No TIF files found in {image_directory}")
+
+    date_patterns = [
+        # Landsat scene IDs: LC08_231064_20200515, false_color_LC08_231064_20200515
+        r'(?:false_color_)?L[CETM]\d{2}_\d{6}_(\d{8})',
+        # Landsat product IDs: LC08_L2SP_232060_20140219_20200911_02_T1
+        r'L[CETM]\d{2}_L\d\w{2}_\d{6}_(\d{8})',
+        # Generic date patterns: YYYYMMDD
+        r'(\d{8})',
+        # Date with separators: YYYY-MM-DD, YYYY_MM_DD
+        r'(\d{4}[-_]\d{2}[-_]\d{2})',
+    ]
+
+    dated_files = []
+    for file_path in tif_files:
+        for pattern in date_patterns:
+            match = re.search(pattern, file_path.name)
+            if match:
+                date_str = match.group(1).replace('-', '').replace('_', '')
+                try:
+                    date_obj = datetime.strptime(date_str, '%Y%m%d')
+                except ValueError:
+                    continue
+                dated_files.append((file_path, date_obj))
+                break
+        else:
+            print(f"Could not parse a date from {file_path.name}; skipping")
+    dated_files.sort(key=lambda x: x[1])
+
+    river_dates = [(river, datetime.strptime(river.acquisition_date, '%Y-%m-%d'))
+                   for river in rivers]
+
+    # For each image, find the closest river within tolerance; each river is
+    # used at most once (closest image wins)
+    candidates = []  # (day_difference, image_index, river)
+    for i, (file_path, image_date) in enumerate(dated_files):
+        for river, river_date in river_dates:
+            diff = abs((image_date - river_date).days)
+            if diff <= tolerance_days:
+                candidates.append((diff, i, river))
+    candidates.sort(key=lambda c: c[0])
+    used_images, used_rivers = set(), set()
+    pairs = {}
+    for diff, i, river in candidates:
+        if i in used_images or id(river) in used_rivers:
+            continue
+        used_images.add(i)
+        used_rivers.add(id(river))
+        pairs[i] = river
+
+    matched_indices = sorted(pairs.keys())
+    matched_rivers = [pairs[i] for i in matched_indices]
+    image_files = [dated_files[i][0] for i in matched_indices]
+    dates = [dated_files[i][1] for i in matched_indices]
+
+    print(f"Matched {len(matched_rivers)} of {len(rivers)} rivers to "
+          f"{len(dated_files)} images (tolerance: {tolerance_days} day(s))")
+    return matched_rivers, image_files, dates

@@ -37,7 +37,8 @@ from .data_io import (
     process_band, read_landsat_data, read_water_index, create_mndwi,
     save_shapefiles, crop_geotiff, read_and_plot_im,
     downsample_raster, save_planetscope_river_result, MinimalDataset,
-    create_water_mask_from_mapping, create_water_mask_from_river
+    create_water_mask_from_mapping, create_water_mask_from_river,
+    normalize_image, crop_image_to_aoi, prepare_image_stack
 )
 
 # Import polygon processing functions
@@ -66,7 +67,7 @@ from .analysis import (
     get_all_channel_widths, get_channel_mouth_polygon, filter_outlier_paths,
     classify_confluences_and_splits
 )
-from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation, find_common_confluences, match_river_segments, filter_rivers_by_length
+from .temporal_analysis import map_graphs_over_time, calculate_node_displacement_deviation, find_common_confluences, match_river_segments, filter_rivers_by_length, match_rivers_to_images
 
 # Import temporal analysis functions
 from .temporal_analysis import (
@@ -81,7 +82,8 @@ from .visualization import (
     plot_im_and_lines, plot_graph_w_colors,
     plot_graph_mappings, plot_deviation_histogram,
     plot_river_segments, plot_centerline_comparison, plot_pair,
-    interactive_scatter, plot_prediction_map
+    interactive_scatter, plot_prediction_map,
+    select_aoi_interactive, make_river_evolution_frames, assemble_movie
 )
 
 # Import additional I/O functions
@@ -134,6 +136,7 @@ __all__ = [
     'write_shapefiles_and_graphs', 'merge_and_plot_channel_polygons', 
     'downsample_raster', 'save_planetscope_river_result', 'MinimalDataset',
     'create_water_mask_from_mapping', 'create_water_mask_from_river',
+    'normalize_image', 'crop_image_to_aoi', 'prepare_image_stack',
     
     # Polygon processing
     'smooth_polygon', 'smooth_line', 'vertex_density_tolerance', 'smooth_banklines',
@@ -158,6 +161,7 @@ __all__ = [
     
     # Temporal analysis
     'find_common_confluences', 'match_river_segments', 'filter_rivers_by_length',
+    'match_rivers_to_images',
     'calculate_iou', 'modified_iou', 'cluster_polygons', 'get_ch_and_bar_areas',
     'create_and_plot_bars', 'create_geodataframe_from_bank_polygons',
     'create_dataframe_from_bank_polygons', 'convert_to_landsat_crs',
@@ -166,6 +170,7 @@ __all__ = [
     # Visualization
     'plot_im_and_lines', 'plot_graph_w_colors',
     'map_graphs_over_time', 'calculate_node_displacement_deviation',
+    'select_aoi_interactive', 'make_river_evolution_frames', 'assemble_movie',
     'plot_graph_mappings', 'plot_deviation_histogram',
     'plot_river_segments', 'plot_centerline_comparison', 'plot_pair',
     'interactive_scatter',

@@ -910,3 +910,113 @@ def create_water_mask_from_river(river, output_path=None, **kwargs):
         output_path=output_path,
         **kwargs
     ) 
+
+def normalize_image(image, saturation_factor=0.5, percentile_stretch=True):
+    """
+    Normalize an image for display, optionally with reduced saturation.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+        Image array (height, width, bands).
+    saturation_factor : float, optional
+        Factor to reduce saturation (0.0 = grayscale, 1.0 = full saturation).
+        Default 0.5.
+    percentile_stretch : bool, optional
+        Whether to apply a 2-98 percentile stretch per band for better
+        contrast (default True).
+
+    Returns
+    -------
+    numpy.ndarray
+        Normalized image with values in [0, 1], ready for display.
+    """
+    image = image.astype(np.float32)
+    image = np.nan_to_num(image, nan=0, posinf=0, neginf=0)
+
+    for i in range(image.shape[2]):
+        band = image[:, :, i]
+        if percentile_stretch:
+            valid = band[band > 0]
+            if valid.size == 0:
+                image[:, :, i] = 0.0
+                continue
+            p2, p98 = np.percentile(valid, [2, 98])
+            if p98 > p2:
+                image[:, :, i] = np.clip((band - p2) / (p98 - p2), 0, 1)
+        else:
+            min_val, max_val = band.min(), band.max()
+            if max_val > min_val:
+                image[:, :, i] = (band - min_val) / (max_val - min_val)
+
+    # Reduce saturation by blending with grayscale
+    if saturation_factor < 1.0:
+        gray = np.mean(image, axis=2, keepdims=True)
+        gray = np.repeat(gray, image.shape[2], axis=2)
+        image = saturation_factor * image + (1 - saturation_factor) * gray
+
+    return np.clip(image, 0, 1)
+
+
+def crop_image_to_aoi(image_path, aoi_bounds, n_bands=3):
+    """
+    Read an image cropped to an area of interest.
+
+    Parameters
+    ----------
+    image_path : str or pathlib.Path
+        Path to a georeferenced image file.
+    aoi_bounds : list or tuple
+        (left, right, bottom, top) in the image's coordinate system.
+    n_bands : int, optional
+        Number of bands to keep (default 3, for RGB display).
+
+    Returns
+    -------
+    numpy.ndarray
+        Cropped image array with shape (height, width, bands).
+    """
+    from rasterio.windows import from_bounds
+    with rasterio.open(image_path) as src:
+        left, right, bottom, top = aoi_bounds
+        window = from_bounds(left, bottom, right, top, src.transform)
+        cropped = src.read(window=window)
+        if cropped.shape[0] > n_bands:
+            cropped = cropped[:n_bands]
+        return np.transpose(cropped, (1, 2, 0))
+
+
+def prepare_image_stack(image_files, aoi_bounds, saturation_factor=0.5,
+                        percentile_stretch=True):
+    """
+    Crop and normalize a list of images to a common area of interest.
+
+    Parameters
+    ----------
+    image_files : list of str or pathlib.Path
+        Image files (e.g., from :func:`match_rivers_to_images`).
+    aoi_bounds : list or tuple
+        (left, right, bottom, top) in the images' coordinate system.
+    saturation_factor : float, optional
+        Saturation reduction factor passed to :func:`normalize_image`
+        (default 0.5).
+    percentile_stretch : bool, optional
+        Whether to percentile-stretch each band (default True).
+
+    Returns
+    -------
+    list of numpy.ndarray or None
+        One normalized (height, width, bands) array per input file, in the
+        same order. Entries are None for images that failed to load, so the
+        list stays aligned with the input (and with any matched river list).
+    """
+    image_stack = []
+    for image_path in tqdm(image_files):
+        try:
+            cropped = crop_image_to_aoi(image_path, aoi_bounds)
+            image_stack.append(normalize_image(cropped, saturation_factor,
+                                               percentile_stretch))
+        except Exception as e:
+            print(f"Failed to crop {image_path}: {e}")
+            image_stack.append(None)
+    return image_stack
