@@ -1,5 +1,7 @@
 # rivabar
 
+![tests](https://github.com/zsylvester/rivabar/actions/workflows/tests.yml/badge.svg)
+
 <img src="https://raw.githubusercontent.com/zsylvester/rivabar/main/images/rivabar_logo.png" width="300">
 
 ## Description

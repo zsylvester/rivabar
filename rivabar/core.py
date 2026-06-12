@@ -97,6 +97,11 @@ def _initial_skeletonization_and_graph_setup(fname, dirname, start_x, start_y, e
     
     try:
         graph, start_ind = insert_node(graph, start_ind1, end_ind1, left_utm_x, upper_utm_y, delta_x, delta_y, start_x, start_y)
+        # if start and end snapped to the same edge, inserting the start node
+        # split that edge, so the end edge has to be found again
+        if not graph.has_edge(start_ind2, end_ind2):
+            _, _, start_ind2, end_ind2 = find_graph_edges_close_to_start_and_end_points(
+                graph, start_x, start_y, end_x, end_y, left_utm_x, upper_utm_y, delta_x, delta_y)
         graph, end_ind = insert_node(graph, start_ind2, end_ind2, left_utm_x, upper_utm_y, delta_x, delta_y, end_x, end_y)
     except:
         print('could not find start and end points')
@@ -201,6 +206,9 @@ def _find_main_path_with_fallbacks(graph, start_x, start_y, end_x, end_y, start_
             start_ind1, end_ind1, start_ind2, end_ind2 = find_graph_edges_close_to_start_and_end_points(graph, 
                 start_x, start_y, end_x, end_y, left_utm_x, upper_utm_y, delta_x, delta_y)
             graph, start_ind_new = insert_node(graph, start_ind1, end_ind1, left_utm_x, upper_utm_y, delta_x, delta_y, start_x, start_y)
+            if not graph.has_edge(start_ind2, end_ind2): # start and end snapped to the same edge
+                _, _, start_ind2, end_ind2 = find_graph_edges_close_to_start_and_end_points(
+                    graph, start_x, start_y, end_x, end_y, left_utm_x, upper_utm_y, delta_x, delta_y)
             graph, end_ind_new = insert_node(graph, start_ind2, end_ind2, left_utm_x, upper_utm_y, delta_x, delta_y, end_x, end_y)
             
             try:
