@@ -37,5 +37,6 @@ setup(
         "geopandas>=1.0.0",
         "momepy>=0.9.0",
         "tqdm>=4.67.0",
+        "librosa>=0.10.0",
     ],
 ) 

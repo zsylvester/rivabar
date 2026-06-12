@@ -11,9 +11,6 @@ from datetime import datetime
 from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
 from shapely.ops import unary_union
 from pyproj import Transformer
-import ee
-import ipywidgets as widgets
-from IPython.display import display
 import geopandas
 from scipy.spatial import cKDTree
 
@@ -640,6 +637,9 @@ def create_dataframe_from_bank_polygons(rivers):
 def get_landsat_scene_crs(path_number, row_number, year=2020):
     """
     Get the CRS used by Landsat scenes for a specific path/row.
+
+    Requires the optional earthengine-api package and an authenticated
+    Earth Engine session.
     
     Parameters
     ----------
@@ -653,6 +653,7 @@ def get_landsat_scene_crs(path_number, row_number, year=2020):
     crs_string : str
         EPSG code or CRS string used by Landsat scenes
     """
+    import ee
     
     # Get a sample scene to extract CRS
     if year < 2013:
@@ -696,7 +697,9 @@ def convert_to_landsat_crs(point0_lonlat, point1_lonlat, path_number, row_number
 
 def collect_river_endpoints(m):
     """Interactive map tool to collect start and end points for river analysis."""
-    
+    import ipywidgets as widgets
+    from IPython.display import display
+
     # Data storage
     endpoints = {'start': None, 'end': None}
     
