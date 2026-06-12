@@ -1,0 +1,69 @@
+site_name: rivabar
+site_description: Automatic extraction of channel centerlines and banklines from water index images of rivers
+site_url: https://zsylvester.github.io/rivabar/
+repo_url: https://github.com/zsylvester/rivabar
+repo_name: zsylvester/rivabar
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: blue grey
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: blue grey
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: numpy
+            show_source: true
+            show_root_heading: true
+            members_order: source
+            filters: ["!^_"]
+            show_signature_annotations: false
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Workflows:
+      - Multi-temporal analysis: workflows/temporal.md
+      - Migration prediction: workflows/prediction.md
+      - Animations: workflows/animation.md
+  - API reference:
+      - River class: api/river.md
+      - Core pipeline: api/core.md
+      - Analysis: api/analysis.md
+      - Temporal analysis: api/temporal_analysis.md
+      - Prediction: api/prediction.md
+      - Utils: api/utils.md
+      - Data I/O: api/data_io.md
+      - Graph processing: api/graph_processing.md
+      - Polygon processing: api/polygon_processing.md
+      - Geometry utils: api/geometry_utils.md
+      - Visualization: api/visualization.md

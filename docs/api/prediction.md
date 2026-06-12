@@ -1,0 +1,3 @@
+# `rivabar.prediction`
+
+::: rivabar.prediction

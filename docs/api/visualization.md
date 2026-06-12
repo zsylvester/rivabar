@@ -1,0 +1,3 @@
+# `rivabar.visualization`
+
+::: rivabar.visualization

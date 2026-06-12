@@ -1,0 +1,3 @@
+# `rivabar.core`
+
+::: rivabar.core

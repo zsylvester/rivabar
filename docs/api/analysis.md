@@ -1,0 +1,3 @@
+# `rivabar.analysis`
+
+::: rivabar.analysis
