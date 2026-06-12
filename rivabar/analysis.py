@@ -189,10 +189,8 @@ def find_zero_crossings(curve):
         if np.mean(curve[loc_zero_curv[i-1]:loc_zero_curv[i]])<0:
             max_curv[i-1] = np.min(curve[loc_zero_curv[i-1]:loc_zero_curv[i]])
         max_local_ind = find_condition(curve[loc_zero_curv[i-1]:loc_zero_curv[i]]==max_curv[i-1])
-        if len(max_local_ind)>1:
+        if len(max_local_ind) > 0:
             loc_max_curv[i-1] = loc_zero_curv[i-1] + max_local_ind[0]
-        elif len(max_local_ind)==1:
-            loc_max_curv[i-1] = loc_zero_curv[i-1] + max_local_ind
         else:
             loc_max_curv[i-1] = 0
     return loc_zero_curv, loc_max_curv
