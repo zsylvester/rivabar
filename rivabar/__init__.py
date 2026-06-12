@@ -102,7 +102,7 @@ from .prediction import (
     predict_forward_local
 )
 
-__version__ = "1.0.0"
+__version__ = "0.2.0"
 __author__ = "Zoltan Sylvester"
 __email__ = "zoltan.sylvester@beg.utexas.edu"
 

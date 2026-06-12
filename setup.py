@@ -5,14 +5,14 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="rivabar",
-    version="0.1.2",
+    version="0.2.0",
     author="Zoltan Sylvester",
     author_email="zsylvester@gmail.com", 
     description="A Python package to automatically extract channel centerlines and banklines from water index images of rivers",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/zsylvester/rivabar",
-    packages=find_packages(),
+    packages=find_packages(exclude=["tests", "tests.*"]),
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",
